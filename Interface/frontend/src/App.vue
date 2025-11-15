@@ -10,7 +10,6 @@ const currentSection = ref('Overview')
 
 const sections = [
   'Overview',
-  'Asset Management',
   'Fault History',
   'Maintenance History',
   'Model Health',
