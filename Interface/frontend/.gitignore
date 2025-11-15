@@ -1,7 +1,3 @@
-*__pycache__
-*.env
-AI/training/data
-*joblib
 # Logs
 logs
 *.log
