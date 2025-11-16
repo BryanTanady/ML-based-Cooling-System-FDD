@@ -59,3 +59,29 @@ def prepare_training_data(training_data: Mapping[int, list[str] ], shuffle: bool
     
     return result
 
+def auto_stft_params(
+    window_size: int | None = None,
+    sampling_rate: int | None = None,
+):
+    if window_size is None:
+        window_size = SensorConfig.WINDOW_SIZE
+    if sampling_rate is None:
+        sampling_rate = SensorConfig.SAMPLING_RATE
+
+    Ws = int(window_size)
+
+    if Ws < 32:
+        nperseg = Ws
+    else:
+        target = max(16, Ws // 3)
+        nperseg = 1 << (target.bit_length() - 1)
+        if nperseg > Ws:
+            nperseg //= 2
+
+    noverlap = nperseg // 2
+
+    nfft = 1 << (nperseg - 1).bit_length()
+    nfft = max(64, nfft)
+    nfft = min(4096, nfft)
+
+    return int(nperseg), int(noverlap), int(nfft)

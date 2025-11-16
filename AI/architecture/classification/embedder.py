@@ -2,10 +2,11 @@
 from abc import abstractmethod
 import numpy as np
 from typing import Any
-from scipy.signal import welch, detrend, find_peaks
+from scipy.signal import welch, detrend, find_peaks, spectrogram
 from scipy.stats import skew, kurtosis
 from scipy.integrate import trapezoid
-
+from architecture.classification.embedder import *
+import matplotlib.pyplot as plt
 
 # Internal imports
 from config.data import *
@@ -237,10 +238,96 @@ class MLEmbedder1(Embedder):
         return feats
 
 
+class Spectrogram2DEmbedder(Embedder):
+    """
+    Convert RawAccWindow into a 2D spectrogram
+    """
 
+    def __init__(
+        self,
+        nperseg: int = 32, # window length (in samples) used for each STFT segment
+        noverlap: int = 16, # number of overlapped samples between consecutive segments
+        nfft: int = 64, # FFT size
+        fmax: float | None = None, # cutoff frequency
+        log_eps: float = 1e-12, # small epsilon to avoid log(0)
+    ):
+        self.nperseg = nperseg
+        self.noverlap = noverlap
+        self.nfft = nfft
+        self.fmax = fmax
+        self.log_eps = log_eps
 
+    def _acc_magnitude(self, window: RawAccWindow) -> np.ndarray:
+        ax = window.acc_x.astype(float)
+        ay = window.acc_y.astype(float)
+        az = window.acc_z.astype(float)
+        return np.sqrt(ax**2 + ay**2 + az**2)
 
+    def _compute_spectrogram(self, acc: np.ndarray):
+        fs = SensorConfig.SAMPLING_RATE
 
-            
+        # Compute STFT from scipy
+        f, t, Sxx = spectrogram(
+            acc,
+            fs=fs,
+            window="hann",
+            nperseg=self.nperseg,
+            noverlap=self.noverlap,
+            nfft=self.nfft,
+            scaling="density",
+            mode="magnitude",
+        )
 
+        # cut off freq settings
+        if self.fmax is not None:
+            mask = f <= self.fmax
+            f = f[mask]
+            Sxx = Sxx[mask, :]
 
+        # convert to log-magnitude
+        Sxx_log = np.log10(Sxx + self.log_eps)
+
+        # normalize to [0, 1]
+        Smin = Sxx_log.min()
+        Sxx_log -= Smin
+        Smax = Sxx_log.max()
+        if Smax > 0:
+            Sxx_norm = Sxx_log / Smax
+        else:
+            Sxx_norm = Sxx_log  # edge case: all zeros
+
+        return Sxx_norm.astype(np.float32), f, t
+
+    def embed(self, data: list[RawAccWindow]) -> np.ndarray:
+        """ Returns: Numpy array (N, 1, F, T) """
+        specs = []
+        for w in data:
+            acc = self._acc_magnitude(w)
+            spec, f, t = self._compute_spectrogram(acc)
+            # Add channel dimension for 2D CNN input (C = 1)
+            specs.append(spec[None, :, :])  # shape: (1, F, T)
+
+        return np.stack(specs, axis=0)
+
+    def plot_spectrogram_window(self, window: RawAccWindow):
+        """
+        Visualize a single RawAccWindow as a spectrogram.
+        Useful to manually inspect differences between label=0 and label=1.
+        """
+        acc = self._acc_magnitude(window)
+        spec, f, t = self._compute_spectrogram(acc)
+
+        plt.figure(figsize=(5, 4))
+        extent = [t[0], t[-1], f[0], f[-1]]
+        plt.imshow(
+            spec,
+            origin="lower",
+            aspect="auto",
+            extent=extent,
+        )
+        plt.xlabel("Time (s)")
+        plt.ylabel("Frequency (Hz)")
+        plt.title(f"Spectrogram (label={window.label})")
+        plt.colorbar(label="Normalized log |S(f,t)|")
+        plt.tight_layout()
+        plt.show()
