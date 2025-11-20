@@ -156,7 +156,6 @@ const setSection = (section) => {
 .section-context {
   flex: 1;
   height: 95%;
-  overflow-y: auto;
 }
 
 .section-placeholder {

@@ -32,7 +32,6 @@ export function useAlerts() {
           const raw = JSON.parse(evt.data)
           const payload = {
             asset_id: raw.asset_id || 'Unknown asset',
-            severity: (raw.severity || 'info').toLowerCase(),
             message: raw.message || 'Unknown alert',
             ts: raw.ts || Date.now(),
             count: raw.count || 0,
@@ -40,7 +39,7 @@ export function useAlerts() {
           alerts.value.unshift(payload)
           current.value = payload
         } catch (e) {
-          const fallback = { asset_id: 'Unknown asset', severity: 'info', message: String(evt.data), ts: Date.now() }
+          const fallback = { asset_id: 'Unknown asset', message: String(evt.data), ts: Date.now() }
           alerts.value.unshift(fallback)
           current.value = fallback
         }

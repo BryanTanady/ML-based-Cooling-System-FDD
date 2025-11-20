@@ -21,7 +21,7 @@ class Alert(BaseModel):
     ts: Optional[float] = None
 
 severity_list = ["critical", "major", "minor", "info"]
-message_list = ["Fan Blocked", "Fan Overheated", "Fan Malfunction", "Fan Stopped", "Blades Broken"]
+message_list = ["Fan Blocked", "Fan Blade Issue", "Electrical Fault", "Unknown"]
 asset_list = [
     "FAN-01", "FAN-02", "FAN-03", "FAN-04", "FAN-05",
     "FAN-21", "FAN-22", "FAN-23", "FAN-24", "FAN-25",

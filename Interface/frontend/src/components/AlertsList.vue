@@ -9,11 +9,10 @@
         v-for="(alert, index) in alerts" 
         :key="index" 
         class="alert-item"
-        :class="alert.severity"
+        :class="getFaultType(alert.message)"
       >
         <div class="alert-header">
           <span class="alert-asset">{{ alert.asset_id }}</span>
-          <span class="alert-severity">{{ alert.severity.toUpperCase() }}</span>
         </div>
         <div class="alert-message">{{ alert.message }}</div>
         <div class="alert-footer">
@@ -38,34 +37,73 @@ const formatTime = (ts) => {
   const timestamp = ts < 10000000000 ? ts * 1000 : ts
   return new Date(timestamp).toLocaleString()
 }
+
+// Determine fault type from alert message
+const getFaultType = (message) => {
+  if (!message) return 'Unknown'
+  if (message.includes('Fan Blocked')) {
+    return 'Fan_Blocked'
+  } else if (message.includes('Fan Blade Issue')) {
+    return 'Fan_Blade_Issue'
+  } else if (message.includes('Electrical Fault')) {
+    return 'Electrical_Fault'
+  } else {
+    return 'Unknown'
+  }
+}
+
 </script>
 
 <style scoped>
-.detected-faults{
+.detected-faults {
   padding: 20px;
+  background: #f9f9f9;
   border-radius: 8px;
   border: 1px solid black;
-  height: 50%;
+  height: 60%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .detected-faults h3 {
-  margin: 0 0 16px 0;
+  margin: 0 0 20px 0;
   color: #333;
-}
-
-.alert-count {
-  color: #f44336;
-  font-weight: normal;
-  font-size: 0.9em;
+  flex-shrink: 0;
 }
 
 .alerts-list {
   display: flex;
   flex-direction: column;
-
   gap: 12px;
-  max-height: 600px;
+  flex: 1 1 0;
   overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  max-height: 100%;
+}
+
+.alerts-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.alerts-list::-webkit-scrollbar-track {
+  background: #f5f5f5;
+  border-radius: 3px;
+}
+
+.alerts-list::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 3px;
+}
+
+.alerts-list::-webkit-scrollbar-thumb:hover {
+  background: #999;
+}
+
+.alerts-list {
+  scrollbar-width: thin;
+  scrollbar-color: #ccc #f5f5f5;
 }
 
 .no-alerts {
@@ -76,39 +114,33 @@ const formatTime = (ts) => {
 }
 
 .alert-item {
-  background: #ffffff;
-  border-left: 4px solid #0087DC;
+  background: white;
   border-radius: 6px;
   padding: 12px 16px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-  border: 1px solid black;
-  transition: transform 0.2s, box-shadow 0.2s;
+  border-left: 4px solid;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
-.alert-item:hover {
-  transform: translateX(2px);
-  box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+.alert-item.Fan_Blocked {
+  border-left-color: #0000FF;
 }
 
-.alert-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
+.alert-item.Fan_Blade_Issue {
+  border-left-color: #4caf50;
 }
+
+.alert-item.Electrical_Fault {
+  border-left-color: #ff9800;
+}
+
+.alert-item.Unknown {
+  border-left-color: #f44336;
+}
+
 
 .alert-asset {
   font-weight: 600;
-  color: #222;
-  font-size: 16px;
-}
-
-.alert-severity {
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
+  color: #333;
 }
 
 .alert-message {
@@ -136,42 +168,4 @@ const formatTime = (ts) => {
 .alert-time {
   color: #999;
 }
-
-/* Severity color coding */
-.alert-item.critical {
-  border-left-color: #f44336;
-}
-
-.alert-item.critical .alert-severity {
-  background-color: #f44336;
-  color: white;
-}
-
-.alert-item.major {
-  border-left-color: #ff9800;
-}
-
-.alert-item.major .alert-severity {
-  background-color: #ff9800;
-  color: white;
-}
-
-.alert-item.minor {
-  border-left-color: #4caf50;
-}
-
-.alert-item.minor .alert-severity {
-  background-color: #4caf50;
-  color: white;
-}
-
-.alert-item.info {
-  border-left-color: #0087DC;
-}
-
-.alert-item.info .alert-severity {
-  background-color: #0087DC;
-  color: white;
-}
 </style>
-
