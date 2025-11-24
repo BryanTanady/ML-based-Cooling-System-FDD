@@ -4,8 +4,8 @@ import random
 from pathlib import Path
 from collections.abc import Mapping
 
-from config.system import *
-from config.data import *
+from common.config.system import *
+from common.config.data import *
 
 def cvt_dict_feats_to_np(dict_features: list[dict[str, float]], feature_names: list[str]) -> np.ndarray:
     return np.array([

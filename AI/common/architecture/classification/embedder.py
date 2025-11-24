@@ -5,14 +5,11 @@ from typing import Any
 from scipy.signal import welch, detrend, find_peaks, spectrogram
 from scipy.stats import skew, kurtosis
 from scipy.integrate import trapezoid
-from architecture.classification.embedder import *
 import matplotlib.pyplot as plt
 
 # Internal imports
-from config.data import *
-from config.system import *
-
-from utils.utils import cvt_dict_feats_to_np
+from common.config.data import *
+from common.config.system import *
 
 class Embedder():
     """Embedder is the component that "translates" raw inputs into formats that ML/DL understands."""

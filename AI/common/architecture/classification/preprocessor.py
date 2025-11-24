@@ -1,5 +1,5 @@
 from abc import abstractmethod
-from config.data import RawInput
+from common.config.data import RawInput
 
 class Preprocessor():
     """Preprocessor represents the component that guarantees every inputs

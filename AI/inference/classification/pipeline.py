@@ -1,6 +1,6 @@
-from .embedder import *
-from .inferrer import *
-from .preprocessor import *
+from common.architecture.classification.embedder import *
+from common.architecture.classification.inferrer import *
+from common.architecture.classification.preprocessor import *
 
 class ClassificationPipeline:
     """A high level classifier composed of:

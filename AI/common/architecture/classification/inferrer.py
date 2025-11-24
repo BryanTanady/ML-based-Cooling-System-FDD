@@ -4,9 +4,6 @@ from typing import Protocol
 import numpy as np
 
 
-from config.data import RawInput
-from architecture.classification.operating_types import OperatingCondition
-
 class Inferrer():
     """Inferrer represents the actual model (ML/DL) that is trainable and runs the inference."""
     def __init__(self, model):
