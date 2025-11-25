@@ -3,7 +3,7 @@ import serial
 import time
 import pandas as pd
 
-PORT = "/dev/pts/17"  # the other end from SerialReader
+PORT = "/dev/pts/10"  # the other end from SerialReader
 TEST_FILE = "fdd_system/broker/sample_data/normal.csv"
 BAUD = 9600
 
@@ -16,7 +16,7 @@ try:
         # i += 1
         # ser.write(line.encode("utf-8"))
         # ser.flush()
-        # time.sleep(0.02)
+    # time.sleep(0.02)
 
         df = pd.read_csv(TEST_FILE)
         for _, row in df.iterrows():

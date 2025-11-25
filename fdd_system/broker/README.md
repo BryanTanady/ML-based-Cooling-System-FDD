@@ -11,7 +11,7 @@ socat -d -d PTY,link=/tmp/ttySIM1,raw,echo=0 PTY,link=/tmp/ttySIM2,raw,echo=0
 python -m fdd_system.broker.main \
   --port [CHANGEME] \
   --baudrate 9600 \
-  --model-path fdd_system/AI/training/ML/weights/rf_model.joblib \
+  --model-path experiment/weights/rf_model.joblib \
   --loop-delay 0.05
 ```
 
