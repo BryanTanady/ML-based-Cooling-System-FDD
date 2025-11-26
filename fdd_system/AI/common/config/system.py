@@ -5,5 +5,5 @@ class FanConfig():
 
 class SensorConfig():
     SAMPLING_RATE = 400
-    WINDOW_SIZE = 100
-    STRIDE = 50
+    WINDOW_SIZE = 200
+    STRIDE = 20

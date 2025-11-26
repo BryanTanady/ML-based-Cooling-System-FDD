@@ -30,15 +30,21 @@ class RawAccWindow(RawInput):
     acc_z: np.ndarray
 
     @classmethod
-    def from_dataframe_public_dset(cls, df: pd.DataFrame, label_: int):
+    def from_dataframe_public_dset(cls, df: pd.DataFrame, label_: int, col_names: list[str]):
         """Parse from dataframe to RawAccWindow.
+
+        Args:
+            col_names: list col names for acc_x, acc_y and z in the dataset
 
         NOTE: THIS PARSER IS CURRENTLY BASED ON PUBLIC DATASET CSV
         """
+        assert len(col_names) == 3 
+        
+        x, y, z = col_names
 
-        acc_x = df["AccelerometerX"].to_numpy()
-        acc_y = df["AccelerometerY"].to_numpy()
-        acc_z = df["AccelerometerZ"].to_numpy()
+        acc_x = df[x].to_numpy()
+        acc_y = df[y].to_numpy()
+        acc_z = df[z].to_numpy()
 
         return cls(
             acc_x=acc_x,

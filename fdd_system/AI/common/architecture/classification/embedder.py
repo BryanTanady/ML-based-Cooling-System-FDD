@@ -159,7 +159,7 @@ class MLEmbedder1(Embedder):
             "jerk_rms"       : np.sqrt(np.mean(dx**2)),
         }
 
-        feats["hjorth_complexity"] = feats["hjorth_mobility"] / feats["hjorth_mobility_"]
+        feats["hjorth_complexity"] = feats["hjorth_mobility_"] / (feats["hjorth_mobility"] + 1e-12)
 
         return feats
 
@@ -174,9 +174,13 @@ class MLEmbedder1(Embedder):
     def extract_freq_domain_features(self, acc: np.ndarray, sampling_rate: int, window_size: int, stride: int, num_blades: int):
         feats = {}
 
-        f, pxx = welch(acc, fs=sampling_rate, nperseg=window_size, noverlap=stride, nfft=512)
+        # Pick an FFT size dynamically so larger window sizes are supported.
+        # Use next power-of-two >= window_size for efficiency and to satisfy nfft >= nperseg.
+        nfft = 1 << (int(window_size) - 1).bit_length()
 
-        E_tot = trapezoid(pxx, x=f)
+        f, pxx = welch(acc, fs=sampling_rate, nperseg=window_size, noverlap=stride, nfft=nfft)
+
+        E_tot = trapezoid(pxx, x=f) + 1e-12
         f1 = self.est_f1(f, pxx)
 
         feats.update({
