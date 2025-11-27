@@ -3,8 +3,8 @@ import serial
 import time
 import pandas as pd
 
-PORT = "/dev/pts/9"  # the other end from SerialReader
-TEST_FILE = "fdd_system/broker/sample_data/blocked.csv"
+PORT = "/dev/pts/11"  # the other end from SerialReader
+TEST_FILE = "fdd_system/broker/sample_data/normal.csv"
 BAUD = 9600
 
 ser = serial.Serial(PORT, BAUD)

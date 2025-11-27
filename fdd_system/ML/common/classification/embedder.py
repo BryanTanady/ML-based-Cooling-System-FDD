@@ -8,11 +8,11 @@ from scipy.integrate import trapezoid
 import matplotlib.pyplot as plt
 
 # Internal imports
-from fdd_system.AI.common.config.data import (
+from fdd_system.ML.common.config.data import (
     RawInput,
     RawAccWindow,
 )
-from fdd_system.AI.common.config.system import (
+from fdd_system.ML.common.config.system import (
     FanConfig,
     SensorConfig,
 )
@@ -178,7 +178,16 @@ class MLEmbedder1(Embedder):
         # Use next power-of-two >= window_size for efficiency and to satisfy nfft >= nperseg.
         nfft = 1 << (int(window_size) - 1).bit_length()
 
-        f, pxx = welch(acc, fs=sampling_rate, nperseg=window_size, noverlap=stride, nfft=nfft)
+        # Increase spectral averaging smoothness with higher segment overlap than stream stride.
+        noverlap = max(0, min(window_size - 1, int(0.6 * window_size)))
+
+        f, pxx = welch(
+            acc,
+            fs=sampling_rate,
+            nperseg=window_size,
+            noverlap=noverlap,
+            nfft=nfft,
+        )
 
         E_tot = trapezoid(pxx, x=f) + 1e-12
         f1 = self.est_f1(f, pxx)

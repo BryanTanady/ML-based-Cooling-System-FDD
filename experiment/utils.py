@@ -4,8 +4,8 @@ import random
 from pathlib import Path
 from collections.abc import Mapping
 
-from fdd_system.AI.common.config.system import *
-from fdd_system.AI.common.config.data import *
+from fdd_system.ML.common.config.system import *
+from fdd_system.ML.common.config.data import *
 
 def cvt_dict_feats_to_np(dict_features: list[dict[str, float]], feature_names: list[str]) -> np.ndarray:
     return np.array([
@@ -14,7 +14,7 @@ def cvt_dict_feats_to_np(dict_features: list[dict[str, float]], feature_names: l
     ])
 
 
-def _parse_training_data(data_paths: list[str], label: int, window_size: int, stride: int) -> list[RawAccWindow]:
+def _parse_training_data(data_paths: list[str], label: int, window_size: int, stride: int, col_names: list[str]) -> list[RawAccWindow]:
     """Parse list of paths to data with same label.
     
     Args:
@@ -33,14 +33,14 @@ def _parse_training_data(data_paths: list[str], label: int, window_size: int, st
         x = pd.read_csv(path)        
         n = len(x)
         windowed_data = [
-            RawAccWindow.from_dataframe_public_dset(x.iloc[i:i + window_size], label)
+            RawAccWindow.from_dataframe_public_dset(x.iloc[i:i + window_size], label, col_names)
             for i in range(0, n - window_size + 1, stride)
         ]
 
         data.extend(windowed_data)
     return data
 
-def prepare_training_data(training_data: Mapping[int, list[str] ], shuffle: bool) -> list[RawAccWindow]:
+def prepare_training_data(training_data: Mapping[int, list[str] ], shuffle: bool, col_names: list[str]) -> list[RawAccWindow]:
     """Parse training data csv into list of dictionaries, each represents a single window of data.
     
     Args:
@@ -52,7 +52,7 @@ def prepare_training_data(training_data: Mapping[int, list[str] ], shuffle: bool
     """
     result = []
     for label, paths in training_data.items():
-        result.extend(_parse_training_data(paths, label, SensorConfig.WINDOW_SIZE, SensorConfig.STRIDE))
+        result.extend(_parse_training_data(paths, label, SensorConfig.WINDOW_SIZE, SensorConfig.STRIDE, col_names))
 
     if shuffle:
         random.shuffle(result)

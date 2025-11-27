@@ -20,13 +20,14 @@ import joblib
 import numpy as np
 
 from fdd_system.broker.SerialReader import SerialReader
-from fdd_system.AI.common.config.system import SensorConfig
-from fdd_system.AI.common.config.data import RawAccWindow
-from fdd_system.AI.common.architecture.classification.embedder import MLEmbedder1
-from fdd_system.AI.common.architecture.classification.inferrer import SklearnMLInferrer
-from fdd_system.AI.common.architecture.classification.operating_types import OperatingCondition
-from fdd_system.AI.common.architecture.classification.preprocessor import DummyPreprocessor
-from fdd_system.AI.inference.classification.pipeline import ClassificationPipeline
+from fdd_system.ML.common.config.system import SensorConfig
+from fdd_system.ML.common.config.data import RawAccWindow
+from fdd_system.ML.common.config.operating_types import OperatingCondition
+
+from fdd_system.ML.common.classification.embedder import MLEmbedder1
+from fdd_system.ML.common.classification.inferrer import SklearnMLInferrer
+from fdd_system.ML.common.classification.preprocessor import DummyPreprocessor
+from fdd_system.ML.inference.classification_pipeline import ClassificationPipeline
 class WindowBuilder:
     """Accumulates accelerometer samples into RawAccWindow objects."""
 

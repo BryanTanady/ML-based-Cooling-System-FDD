@@ -1,6 +1,6 @@
-from fdd_system.AI.common.architecture.classification.embedder import *
-from fdd_system.AI.common.architecture.classification.inferrer import *
-from fdd_system.AI.common.architecture.classification.preprocessor import *
+from fdd_system.ML.common.classification.embedder import *
+from fdd_system.ML.common.classification.inferrer import *
+from fdd_system.ML.common.classification.preprocessor import *
 
 class ClassificationPipeline:
     """A high level classifier composed of:
