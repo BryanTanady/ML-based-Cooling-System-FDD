@@ -18,19 +18,18 @@ void setup() {
 
   // 1. Initialize Sensor
   if(!accel.begin()) {
-    Serial.println("No ADXL345 detected! Check wiring.");
+    // Serial.println("No ADXL345 detected! Check wiring.");
     while(1);
   }
   accel.setRange(ADXL345_RANGE_2_G);
 
-  Serial.println("Fan System Starting...");
   
   // 2. Spin up the Fan (Remember: 0 is ON for your P-Channel)
   analogWrite(fanPin, 0);
   delay(3000); 
 
   // 3. Calibration Phase
-  Serial.println("Calibrating 'Normal' Vibration...");
+  // Serial.println("Calibrating 'Normal' Vibration...");
   float totalVibration = 0;
   int samples = 100;
 
@@ -40,9 +39,13 @@ void setup() {
   }
   
   baselineVibration = totalVibration / samples;
-  Serial.print("Baseline Vibration Level: ");
-  Serial.println(baselineVibration);
-  Serial.println("Sentinel Mode Active.");
+
+  accel.setDataRate(ADXL345_DATARATE_3200_HZ);
+  
+
+  // Serial.print("Baseline Vibration Level: ");
+  // Serial.println(baselineVibration);
+  // Serial.println("Sentinel Mode Active.");
 }
 
 void loop() {
@@ -62,12 +65,12 @@ void loop() {
   }
   
   // --- CHANGE #2: Made "Stopped" alert less sensitive ---
-  // We now only trigger if vibration is extremely low (was 1.0)
+  // We now only trigger if vibration is extremely low (was 1.0)x
   //if (currentVib < 0.5) { 
   //   Serial.println("⚠️ ALERT: FAN STOPPED! ⚠️");
   //}
 
-  delay(50);
+  delay(1000/1600);
 }
 
 // Helper function to calculate "G-Force Intensity"
@@ -75,7 +78,6 @@ float measureVibration() {
   sensors_event_t event; 
   accel.getEvent(&event);
   
-  float magnitude = sqrt(sq(event.acceleration.x) + sq(event.acceleration.y) + sq(event.acceleration.z));
   
   char buffer[64];
 
@@ -97,5 +99,5 @@ float measureVibration() {
 
   // Serial.println(event.acceleration.x);
   // Subtract gravity (approx 9.8 m/s^2) to see just the vibration
-  return abs(magnitude - 9.8);
+  return 0;
 }
