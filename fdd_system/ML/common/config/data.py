@@ -24,10 +24,19 @@ class RawAccWindow(RawInput):
     
     Args:
         acc_x,y,z: acceleration on each axis.
+        timestamps: optional per-sample timestamps (seconds). When provided,
+            preprocessing can resample onto a clean, uniform grid.
+        sampling_rate_hz: optional sampling rate hint for this window. If not
+            set, SensorConfig.SAMPLING_RATE is used.
+        acc_mag: optional pre-computed magnitude channel for orientation-robust
+            processing.
     """
     acc_x: np.ndarray
     acc_y: np.ndarray
     acc_z: np.ndarray
+    timestamps: Optional[np.ndarray] = None
+    sampling_rate_hz: Optional[float] = None
+    acc_mag: Optional[np.ndarray] = None
 
     @classmethod
     def from_dataframe_public_dset(cls, df: pd.DataFrame, label_: int, col_names: list[str]):
@@ -54,4 +63,3 @@ class RawAccWindow(RawInput):
         )
 
     
-

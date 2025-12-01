@@ -1,101 +1,126 @@
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+#include <avr/wdt.h>   // Comment out if not AVR
 
-// Create the sensor object
+// ----------------- Globals & Config -----------------
+
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
 
 const int fanPin = 9;
-float baselineVibration = 0;
 
-// --- CHANGE #1: Made "Wobble" alert less sensitive ---
-// We will only trigger if vibration is 3x higher than normal (was 2.0)
-float sensitivity = 3.0; 
+const unsigned long SAMPLE_INTERVAL_US = 625;  // target ~1600 Hz
+unsigned long lastSampleUs             = 0;
+
+unsigned long sampleCount    = 0;    // counts ALL sensor samples per RATE window
+unsigned long lastRateReport = 0;
+const uint16_t PRINT_EVERY_N = 1;
+
+bool accel_ok = false;
+
+// retry init timing
+unsigned long lastRetryMs             = 0;
+const unsigned long RETRY_INTERVAL_MS = 100;   // retry every 0.5 s
+
+// timing to recover sampling rate
+unsigned long firstSampleUs = 0;
+bool haveFirstSample        = false;
+uint32_t globalSampleIndex  = 0;    // monotonically increasing sample index
+
+// ----------------- Helpers -----------------
+
+void try_init_accel() {
+  if (accel.begin()) {
+    accel_ok = true;
+    accel.setDataRate(ADXL345_DATARATE_1600_HZ);
+    accel.setRange(ADXL345_RANGE_2_G);
+  } else {
+    accel_ok = false;
+  }
+}
+
+// Emit one S line given ax, ay, az and current time.
+void printSampleLine(float ax, float ay, float az, unsigned long nowUs) {
+  if (!haveFirstSample) {
+    firstSampleUs   = nowUs;
+    haveFirstSample = true;
+  }
+  unsigned long tRelUs = nowUs - firstSampleUs;
+  
+  Serial.print("S ");
+  Serial.print(tRelUs);
+  Serial.print(' ');
+  Serial.print(ax, 3);
+  Serial.print(' ');
+  Serial.print(ay, 3);
+  Serial.print(' ');
+  Serial.println(az, 3);
+}
+
+// ----------------- Arduino Setup / Loop -----------------
 
 void setup() {
-  Serial.begin(9600);
+  // Enable watchdog with ~2s timeout (AVR only)
+  wdt_enable(WDTO_2S);
+
+  Serial.begin(115200);
+  delay(500);
+
   pinMode(fanPin, OUTPUT);
 
-  // 1. Initialize Sensor
-  if(!accel.begin()) {
-    Serial.println("No ADXL345 detected! Check wiring.");
-    while(1);
-  }
-  accel.setRange(ADXL345_RANGE_2_G);
-
-  Serial.println("Fan System Starting...");
-  
-  // 2. Spin up the Fan (Remember: 0 is ON for your P-Channel)
+  // Start fan (for your P-channel arrangement 0 = full on)
   analogWrite(fanPin, 0);
-  delay(3000); 
 
-  // 3. Calibration Phase
-  Serial.println("Calibrating 'Normal' Vibration...");
-  float totalVibration = 0;
-  int samples = 100;
+  Wire.begin();
+  Wire.setClock(400000);  // fast I2C (needs proper pull-ups)
+  Wire.setTimeout(50);    // 50 ms timeout for I2C operations
 
-  for(int i=0; i<samples; i++) {
-    totalVibration += measureVibration();
-    delay(10);
-  }
-  
-  baselineVibration = totalVibration / samples;
-  Serial.print("Baseline Vibration Level: ");
-  Serial.println(baselineVibration);
-  Serial.println("Sentinel Mode Active.");
+  // Initial attempt to init sensor
+  try_init_accel();
 }
 
 void loop() {
-  // Measure current vibration
-  float currentVib = measureVibration();
+  // Feed watchdog every iteration
+  wdt_reset();
 
-  // Debug print (Use Serial Plotter!)
-  //Serial.print("Vibration:");
-  // Serial.println(currentVib);
-  //Serial.print(",");
-  //Serial.println(baselineVibration * sensitivity);
+  unsigned long nowMs = millis();
+  unsigned long nowUs = micros();
 
-  // 4. Anomaly Check
-  // If vibration is 3x higher than normal -> WOBBLE DETECTED
-  if (currentVib > (baselineVibration * sensitivity)) {
-    // Serial.println("⚠️ ALERT: HIGH VIBRATION DETECTED! ⚠️");
+  // ----------------- If sensor not OK, keep retrying -----------------
+  if (!accel_ok) {
+    if (nowMs - lastRetryMs >= RETRY_INTERVAL_MS) {
+      lastRetryMs = nowMs;
+      try_init_accel();
+    }
+    return;
   }
-  
-  // --- CHANGE #2: Made "Stopped" alert less sensitive ---
-  // We now only trigger if vibration is extremely low (was 1.0)
-  //if (currentVib < 0.5) { 
-  //   Serial.println("⚠️ ALERT: FAN STOPPED! ⚠️");
-  //}
 
-  delay(50);
-}
+  // ----------------- Normal sampling loop -----------------
+  if (nowUs - lastSampleUs >= SAMPLE_INTERVAL_US) {
+    lastSampleUs = nowUs;
 
-// Helper function to calculate "G-Force Intensity"
-float measureVibration() {
-  sensors_event_t event; 
-  accel.getEvent(&event);
-  
-  float magnitude = sqrt(sq(event.acceleration.x) + sq(event.acceleration.y) + sq(event.acceleration.z));
-  
-  char buffer[64];
+    sensors_event_t event;
+    accel.getEvent(&event);
 
-  char fx[16];
-  char fy[16];
-  char fz[16];
+    float ax = event.acceleration.x;
+    float ay = event.acceleration.y;
+    float az = event.acceleration.z;
 
-  float ax = event.acceleration.x;
-  float ay = event.acceleration.y;
-  float az = event.acceleration.z;
+    globalSampleIndex++;
+    sampleCount++;
 
-  dtostrf(ax, 0, 2, fx);
-  dtostrf(ay, 0, 2, fy);
-  dtostrf(az, 0, 2, fz);
+    static uint16_t printCounter = 0;
+    if (++printCounter >= PRINT_EVERY_N) {
+      printCounter = 0;
+      printSampleLine(ax, ay, az, nowUs);
+    }
+  }
 
-  sprintf(buffer, "x %s y %s z %s", fx, fy, fz);
-  Serial.println(buffer);
-
-
-  // Serial.println(event.acceleration.x);
-  // Subtract gravity (approx 9.8 m/s^2) to see just the vibration
-  return abs(magnitude - 9.8);
+  // ----------------- Print effective sample rate -----------------
+  // if (nowMs - lastRateReport >= 1000) {
+  //   Serial.print("RATE ");
+  //   Serial.println(sampleCount);   // samples / ~1s
+  //   sampleCount    = 0;
+  //   lastRateReport = nowMs;
+  // }
 }

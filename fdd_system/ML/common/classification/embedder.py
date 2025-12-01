@@ -253,7 +253,6 @@ class MLEmbedder1(Embedder):
         feats['zeta'] = d['zeta']; feats['fn_struct_hz'] = d['fn']; feats['Q_peak'] = d['Q']
         return feats
 
-
 class Spectrogram2DEmbedder(Embedder):
     """
     Convert RawAccWindow into a 2D spectrogram
