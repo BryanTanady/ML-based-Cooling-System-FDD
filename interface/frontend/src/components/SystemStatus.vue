@@ -24,13 +24,18 @@
 
 <script setup>
 import { computed } from 'vue'
-import { useAlerts } from '@/composables/useAlerts'
-const { alerts } = useAlerts()
 
 // Count alerts by fault type
+const props = defineProps({
+  alerts: {
+    type: Array,
+    default: () => []
+  }
+})
+
 const faultCounts = computed(() => {
   const counts = { 'Fan_Blocked': 0, 'Fan_Blade_Issue': 0, 'Electrical_Fault': 0, 'Unknown': 0 }
-  alerts.value.forEach(alert => {
+  props.alerts.forEach(alert => {
     if (alert.message.includes('Fan Blocked')) {
       counts['Fan_Blocked']++
     } else if (alert.message.includes('Fan Blade Issue')) {

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
@@ -69,11 +70,19 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
+        # iterate over a copy so we can remove safely
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(message)
+            except Exception as e:
+                # connection is dead or closing -> drop it
+                print(f"Removing dead websocket: {e}")
+                self.disconnect(connection)
+
 
 manager = ConnectionManager()
 
@@ -81,19 +90,20 @@ manager = ConnectionManager()
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        while True:
+        while websocket.application_state == WebSocketState.CONNECTED:
             global RECEIVED
             if RECEIVED and RECENT:
-                # send the most recent alert as JSON with count
                 last = RECENT[-1]
                 message = {
                     **last,
                     "count": len(RECENT)
                 }
                 await manager.broadcast(json.dumps(message))
+                print("Frontend Received:", datetime.now(), message)
                 RECEIVED = False
             await asyncio.sleep(0.2)
-    except WebSocketDisconnect:
+    finally:
+        # finally ensures cleanup even on RuntimeError or other exceptions
         manager.disconnect(websocket)
         print("WebSocket disconnected")
 

@@ -13,6 +13,19 @@ export function useAlerts() {
   // close current alert
   const closeCurrent = () => { current.value = null }
 
+  // acknowledge and remove an alert from the list
+  const acknowledgeAlert = (index) => {
+    if (index >= 0 && index < alerts.value.length) {
+      alerts.value.splice(index, 1)
+      // If the removed alert was the current one, clear it
+      if (current.value && alerts.value.length > 0 && index === 0) {
+        current.value = alerts.value[0] || null
+      } else if (alerts.value.length === 0) {
+        current.value = null
+      }
+    }
+  }
+
   // connect to websocket
   const connect = () => {
     try {
@@ -33,7 +46,7 @@ export function useAlerts() {
           const payload = {
             asset_id: raw.asset_id || 'Unknown asset',
             message: raw.message || 'Unknown alert',
-            ts: raw.ts || Date.now(),
+            ts: new Date().getTime(),
             count: raw.count || 0,
           }
           alerts.value.unshift(payload)
@@ -59,5 +72,6 @@ export function useAlerts() {
     status,
     currentAlert: current,
     closeCurrent,
+    acknowledgeAlert,
   }
 }

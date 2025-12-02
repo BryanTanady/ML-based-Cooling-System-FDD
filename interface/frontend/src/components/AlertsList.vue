@@ -16,8 +16,12 @@
         </div>
         <div class="alert-message">{{ alert.message }}</div>
         <div class="alert-footer">
-          <span class="alert-count-badge">Total: {{ alert.count }}</span>
           <span class="alert-time">{{ formatTime(alert.ts) }}</span>
+        </div>
+        <div class="alert-actions">
+          <button @click="acknowledgeAlert(index)" class="acknowledge-btn">
+            Acknowledge
+          </button>
         </div>
       </div>
     </div>
@@ -29,6 +33,10 @@ defineProps({
   alerts: {
     type: Array,
     default: () => []
+  },
+  acknowledgeAlert: {
+    type: Function,
+    required: true
   }
 })
 
@@ -167,5 +175,31 @@ const getFaultType = (message) => {
 
 .alert-time {
   color: #999;
+}
+
+.alert-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.acknowledge-btn {
+  background-color: #0087DC;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background-color 0.2s;
+}
+
+.acknowledge-btn:hover {
+  background-color: #006ba8;
+}
+
+.acknowledge-btn:active {
+  background-color: #005a8f;
 }
 </style>
