@@ -4,9 +4,37 @@
 
 Before running the interface, make sure to do:
 
+1. Install node
+On MacOS/Linux
 ```bash
+brew install node
+```
+After installation, confirm that everything is installed correctly:
+```bash
+node -v
+npm -v
+```
+
+After confirming node is installed correctly:
+```bash
+cd ./interface/fronted
 npm install
-pip install uvicorn fastapi
+```
+
+To run frontend only;
+```bash
+npm run dev
+```
+and open localhost http://localhost:5173/
+
+Make sure python and pip is installed on your machine
+Before running backed, install necessary packages
+```bash
+pip install fastapi
+pip install uvicorn
+pip install starlette
+pip install pydantic
+pip install "fastapi[standard]" motor python-dotenv
 chmod +x run.sh
 ```
 
