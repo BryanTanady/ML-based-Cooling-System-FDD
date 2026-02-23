@@ -1,218 +1,243 @@
-"""Minimal broker CLI that reads serial data, builds windows, and calls the AI pipeline.
+"""Broker CLI entrypoint and runtime orchestration.
 
-Example:
+Example usage:
+    python -m fdd_system.broker.main \
+      --port /dev/ttyACM0 \
+      --baudrate 115200 \
+      --model-path experiment/weights/model_best.joblib \
+      --model-format sklearn \
+      --embedder ml2 \
+      --preprocessor basic
 
-    python3 -m fdd_system.broker.main \
-        --port /dev/ttyACM0 \
-        --baudrate 9600 \
-        --model-path fdd_system/AI/training/ML/weights/rf_model.joblib \
-        --loop-delay 0.05
+    python -m fdd_system.broker.main \
+      --port /dev/ttyACM0 \
+      --baudrate 115200 \
+      --input-format bin \
+      --fs-hz 800 \
+      --model-path experiment/weights/model_best_cnn1d.onnx \
+      --model-format onnx \
+      --embedder raw1dcnn \
+      --preprocessor rms
 """
 
+from __future__ import annotations
+
 import argparse
-import json
 import logging
 import time
 from collections import Counter, deque
-import re
-from typing import Deque, Optional, Tuple
-import joblib
+from typing import Deque
 
-import numpy as np
+import serial
 
-from fdd_system.broker.SerialReader import SerialReader
-from fdd_system.ML.common.config.system import SensorConfig
-from fdd_system.ML.common.config.data import RawAccWindow
+from data_collection.binary_protocol import ADXLBinaryParser
 from fdd_system.ML.common.config.operating_types import OperatingCondition
+from fdd_system.ML.common.config.system import SensorConfig
+from fdd_system.broker.SerialReader import SerialReader
+from fdd_system.broker.alerts import AlertSender
+from fdd_system.broker.parsing import parse_sample
+from fdd_system.broker.pipeline_factory import build_pipeline
+from fdd_system.broker.predictions import record_predictions
+from fdd_system.broker.windowing import WindowBuilder
 
-from fdd_system.ML.common.classification.embedder import MLEmbedder1
-from fdd_system.ML.common.classification.inferrer import SklearnMLInferrer
-from fdd_system.ML.common.classification.preprocessor import DummyPreprocessor, BasicPreprocessor, RobustPreprocessor
-from fdd_system.ML.inference.classification_pipeline import ClassificationPipeline
-class WindowBuilder:
-    """Accumulates accelerometer samples into RawAccWindow objects."""
-
-    def __init__(self, window_size: int):
-        """Initialize a window builder.
-
-        Args:
-            window_size: Number of samples per window (from SensorConfig).
-        """
-        self.window_size = window_size
-        self.samples: Deque[Tuple[float, float, float]] = deque()
-
-    def add(self, ax: float, ay: float, az: float) -> Optional[RawAccWindow]:
-        """Add one accelerometer sample and emit a window when full.
-
-        Args:
-            ax: Acceleration on X axis.
-            ay: Acceleration on Y axis.
-            az: Acceleration on Z axis.
-
-        Returns:
-            RawAccWindow if a full window is available; otherwise None.
-        """
-        self.samples.append((ax, ay, az))
-        if len(self.samples) < self.window_size:
-            return None
-
-        # Build window
-        ax_arr, ay_arr, az_arr = (np.array(vals) for vals in zip(*list(self.samples)[: self.window_size]))
+EXAMPLE_USAGE = """Examples:
+  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --model-path experiment/weights/model_best.joblib --model-format sklearn --embedder ml2 --preprocessor basic
+  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/model_best_cnn1d.onnx --model-format onnx --embedder raw1dcnn --preprocessor robust
+"""
 
 
-        # Slide forward by STRIDE
-        for _ in range(SensorConfig.STRIDE):
-            self.samples.popleft()
-        return RawAccWindow(acc_x=ax_arr, acc_y=ay_arr, acc_z=az_arr)
-
-
-def parse_sample(line: str) -> Optional[Tuple[float, float, float]]:
-    """Parse a comma separate values (CSV) line 'ax, ay, az' into floats.
-
-    Args:
-        line: CSV text line from serial.
-
-    Returns:
-        Tuple (ax, ay, az) as floats, or None on failure.
-    """
-    # Handle log-prefixed lines like ".... Skipping unparsable line: S 123 1.0 2.0 3.0"
-    if "Skipping unparsable line:" in line:
-        line = line.split("Skipping unparsable line:", 1)[1].strip()
-
-    parts = line.strip().split(",")
-    if len(parts) < 3:
-        # Try to parse verbose log-style lines like
-        # "x 1.96 y 2.04 z 2.12"
-        pattern = r"x\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+y\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+z\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
-        match = re.search(pattern, line)
-        if match:
-            try:
-                ax, ay, az = (float(match.group(1)), float(match.group(2)), float(match.group(3)))
-            except ValueError:
-                return None
-            return ax, ay, az
-
-        # Parse new format lines like "S 11840048 2.354 -16.083 18.907"
-        pattern_s = r"S\s+[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)"
-        match_s = re.search(pattern_s, line)
-        if match_s:
-            try:
-                ax = float(match_s.group(1))
-                ay = float(match_s.group(2))
-                az = float(match_s.group(3))
-            except ValueError:
-                return None
-            return ax, ay, az
-        return None
-    try:
-        ax, ay, az = (float(parts[0]), float(parts[1]), float(parts[2]))
-    except ValueError:
-        return None
-    return ax, ay, az
-
-
-def load_model(model_path: str):
-    """Load a trained sklearn model from disk.
-
-    Args:
-        model_path: Filesystem path to a joblib/pkl model.
-
-    Returns:
-        Deserialized model object.
-    """
-    if not joblib:
-        raise ImportError("joblib is required to load the model; install it or adjust load_model.")
-    return joblib.load(model_path)
-
-
-def build_pipeline(model_path: str) -> ClassificationPipeline:
-    """Construct the end-to-end classification pipeline.
-
-    Args:
-        model_path: Filesystem path to the trained model.
-
-    Returns:
-        ClassificationPipeline wired with preprocessor, embedder, and inferrer.
-    """
-    model = load_model(model_path)
-    pre = DummyPreprocessor()
-    emb = MLEmbedder1()
-    inf = SklearnMLInferrer(model)
-    return ClassificationPipeline(pre, emb, inf)
-
-
-def main():
-    """CLI entry for the broker: read serial, infer, and log."""
-    parser = argparse.ArgumentParser(description="Minimal Broker CLI (serial -> AI -> log)")
-    parser.add_argument("--port", type=str, default="COM3",
-                        help="Serial port (e.g., COM3, /dev/ttyACM0), or socket://127.0.0.1:9999")
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build broker CLI parser."""
+    parser = argparse.ArgumentParser(
+        description="Minimal Broker CLI (serial -> AI -> alert API)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=EXAMPLE_USAGE,
+    )
+    parser.add_argument(
+        "--port",
+        type=str,
+        default="COM3",
+        help="Serial port (e.g., COM3, /dev/ttyACM0), or socket://127.0.0.1:9999",
+    )
     parser.add_argument("--baudrate", type=int, default=9600, help="Serial baudrate")
     parser.add_argument("--timeout", type=float, default=1.0, help="Serial timeout (seconds)")
-    parser.add_argument("--model-path", type=str, required=True, help="Path to trained model (joblib/pkl)")
+    parser.add_argument(
+        "--input-format",
+        choices=["csv", "bin"],
+        default="csv",
+        help="Input format from microcontroller: newline-delimited CSV/text ('csv') or binary frames ('bin').",
+    )
+    parser.add_argument(
+        "--fs-hz",
+        type=float,
+        default=float(SensorConfig.SAMPLING_RATE),
+        help="Sampling rate (Hz) used to synthesize timestamps for 9-byte frames.",
+    )
+    parser.add_argument("--model-path", type=str, required=True, help="Path to trained model (.joblib/.pkl/.onnx)")
+    parser.add_argument(
+        "--model-format",
+        choices=["auto", "sklearn", "onnx"],
+        default="auto",
+        help="Model serialization format. Default auto-detects from --model-path suffix.",
+    )
+    parser.add_argument(
+        "--embedder",
+        choices=["auto", "ml1", "ml2", "spectrogram2d", "raw1dcnn"],
+        default="auto",
+        help="Feature embedder to pair with the model.",
+    )
+    parser.add_argument(
+        "--preprocessor",
+        choices=["auto", "basic", "dummy", "robust", "median", "standard", "rms"],
+        default="auto",
+        help="Input preprocessor. Default is basic unless overridden by ONNX metadata.",
+    )
     parser.add_argument("--loop-delay", type=float, default=0.05, help="Sleep between loop iterations (seconds)")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level")
-    parser.add_argument("--run-seconds", type=float, default=None,
-                        help="How long to run before exiting. If not set, runs indefinitely.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--run-seconds",
+        type=float,
+        default=None,
+        help="How long to run before exiting. If not set, runs indefinitely.",
+    )
+    parser.add_argument(
+        "--alert-api-url",
+        type=str,
+        default="http://127.0.0.1:8001/api/alert",
+        help="Backend endpoint to receive non-normal prediction alerts.",
+    )
+    parser.add_argument("--asset-id", type=str, default="FAN-01", help="Asset ID attached to sent alerts.")
+    parser.add_argument(
+        "--alert-timeout",
+        type=float,
+        default=1.0,
+        help="Alert POST timeout in seconds.",
+    )
+    return parser
 
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO),
-                         format="%(asctime)s %(levelname)s %(message)s")
+
+def _log_prediction_counts(prediction_counts: Counter[int], log: logging.Logger) -> None:
+    if not prediction_counts:
+        return
+
+    log.info("Prediction counts:")
+    for cls_id, count in prediction_counts.items():
+        try:
+            cls_name = OperatingCondition(cls_id).name
+        except ValueError:
+            cls_name = f"Unknown({cls_id})"
+        log.info("  %s: %s", cls_name, count)
+
+
+def run_broker(args: argparse.Namespace) -> int:
+    """Runtime entrypoint: read serial, infer, and publish alerts."""
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
     log = logging.getLogger("broker")
 
-    # Shared buffer populated by SerialReader
-    buffer: Deque[str] = deque()
-    reader = SerialReader(port=args.port, baudrate=args.baudrate, timeout=args.timeout, buffer=buffer)
-    window_builder = WindowBuilder(SensorConfig.WINDOW_SIZE)
-    pipeline = build_pipeline(args.model_path)
-    prediction_counts: Counter[int] = Counter()
+    alert_sender = AlertSender(
+        api_url=args.alert_api_url,
+        asset_id=args.asset_id,
+        timeout_sec=float(args.alert_timeout),
+        logger=log,
+    )
 
+    buffer: Deque[str] = deque()
+    reader: SerialReader | None = None
+    ser: serial.SerialBase | None = None
+    bin_parser: ADXLBinaryParser | None = None
+
+    if args.input_format == "csv":
+        reader = SerialReader(port=args.port, baudrate=args.baudrate, timeout=args.timeout, buffer=buffer)
+    else:
+        ser = serial.serial_for_url(args.port, baudrate=args.baudrate, timeout=args.timeout)
+        bin_parser = ADXLBinaryParser(protocol="9", fs_hz=args.fs_hz)
+
+    wb_fs = float(args.fs_hz) if args.input_format == "bin" else float(SensorConfig.SAMPLING_RATE)
+    window_builder = WindowBuilder(SensorConfig.WINDOW_SIZE, sampling_rate_hz=wb_fs)
+    pipeline = build_pipeline(
+        args.model_path,
+        model_format=args.model_format,
+        embedder=args.embedder,
+        preprocessor=args.preprocessor,
+    )
+    prediction_counts: Counter[int] = Counter()
     end_time = time.time() + args.run_seconds if args.run_seconds else None
 
-    log.info("Broker started. Reading from %s @ %s baud", args.port, args.baudrate)
+    log.info(
+        "Broker started. Reading from %s @ %s baud (format=%s, fs_hz=%.3f, alert_api=%s, asset_id=%s)",
+        args.port,
+        args.baudrate,
+        args.input_format,
+        float(args.fs_hz),
+        args.alert_api_url,
+        args.asset_id,
+    )
+
     try:
         while True:
             if end_time and time.time() >= end_time:
                 log.info("Run duration reached; stopping.")
                 break
-            if buffer:
-                line = buffer.popleft()     # read from the buffered data sent from microcontroller
-                sample = parse_sample(line) # read the raw buffered data, to 3 floats 
+
+            if args.input_format == "csv":
+                if not buffer:
+                    time.sleep(args.loop_delay)
+                    continue
+
+                line = buffer.popleft()
+                sample = parse_sample(line)
                 if not sample:
                     log.info("Skipping unparsable line: %s", line.strip())
                     continue
-                
-                # build "window", which is our representation of singleton data understood by ML
-                # We get RawAccWindow once the window is full, otherwise None
-                window = window_builder.add(*sample)
-                length = len(window_builder.samples)
-                if window:
-                    preds = pipeline.predict([window])
-                    # log the prediction
-                    conditions = [OperatingCondition(n).name for n in preds]
-                    log.info("Prediction: %s, %s", preds.tolist(), conditions)
-                    for p in preds:
-                        prediction_counts[int(p)] += 1
 
-                    # TODO: 
-                    # 1. Send prediction to interface's API
-                    #   - Need to define what data is sent
-                    #   - Definitely need some confidence score
-                    #  
-            else:
+                window = window_builder.add(*sample)
+                if window:
+                    preds, confs = pipeline.predict_with_confidence([window])
+                    record_predictions(preds, confs, prediction_counts, alert_sender, log)
+                continue
+
+            assert ser is not None and bin_parser is not None
+            chunk = ser.read(4096)
+            if not chunk:
                 time.sleep(args.loop_delay)
+                continue
+
+            samples = bin_parser.feed(chunk)
+            if not samples:
+                continue
+
+            for sample in samples:
+                window = window_builder.add(float(sample.x), float(sample.y), float(sample.z))
+                if not window:
+                    continue
+                preds, confs = pipeline.predict_with_confidence([window])
+                record_predictions(preds, confs, prediction_counts, alert_sender, log)
+
     except KeyboardInterrupt:
         log.info("Broker stopping (Ctrl+C).")
     finally:
-        if prediction_counts:
-            log.info("Prediction counts:")
-            for cls_id, count in prediction_counts.items():
-                try:
-                    cls_name = OperatingCondition(cls_id).name
-                except ValueError:
-                    cls_name = f"Unknown({cls_id})"
-                log.info("  %s: %s", cls_name, count)
-        reader.stop()
+        _log_prediction_counts(prediction_counts, log)
+
+        if reader is not None:
+            reader.stop()
+
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
+
+    return 0
+
+
+def main() -> int:
+    """Parse CLI args and start broker runtime."""
+    args = build_arg_parser().parse_args()
+    return run_broker(args)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
