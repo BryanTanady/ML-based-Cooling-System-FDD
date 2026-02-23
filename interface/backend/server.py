@@ -7,21 +7,23 @@ from datetime import datetime
 app = FastAPI(title="Capstone API")
 
 app.add_middleware(
-CORSMiddleware,
-allow_origins=[
-"http://localhost:5173", # Vite dev
-"http://127.0.0.1:8080", # ML dev
-],
-allow_credentials=True,
-allow_methods=["*"],
-allow_headers=["*"],
+    CORSMiddleware,
+    allow_origins=[
+    "http://localhost:5173", # Vite dev
+    "http://127.0.0.1:8080", # ML dev
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Alert Data Strcture (TBD: adjust fields as needed)
 class Alert(BaseModel):
     asset_id: str
-    severity: str
+    condition_id: int | None = None
+    condition_name: str | None = None
     message: str
+    confidence: float | None = None
     ts: float | None = None
 
 
@@ -69,11 +71,18 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
+        stale_connections: list[WebSocket] = []
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(message)
+            except (RuntimeError, WebSocketDisconnect):
+                stale_connections.append(connection)
+        for connection in stale_connections:
+            self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -96,5 +105,3 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
         print("WebSocket disconnected")
-
-

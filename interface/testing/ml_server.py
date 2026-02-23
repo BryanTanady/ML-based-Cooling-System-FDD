@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import random
 
-TARGET_URL = "http://127.0.0.1:8000/api/alert"   #backedn endpoint url
+TARGET_URL = "http://127.0.0.1:8001/api/alert"   #backedn endpoint url
 INTERVAL_SEC = 10  # send every 30s (adjust as needed)
 
 app = FastAPI()
@@ -16,12 +16,17 @@ app = FastAPI()
 # Alert json data (can be changed later)
 class Alert(BaseModel):
     asset_id: str
-    severity: str
+    condition_id: int | None = None
+    condition_name: str | None = None
     message: str
+    confidence: float | None = None
     ts: Optional[float] = None
 
-severity_list = ["critical", "major", "minor", "info"]
-message_list = ["Fan Blocked", "Fan Blade Issue", "Electrical Fault", "Unknown"]
+conditions = [
+    (1, "BLOCKED_AIRFLOW", "Blocked Airflow"),
+    (2, "BLADE_ISSUE", "Blade Issue"),
+    (3, "POWER_ISSUE", "Power Issue"),
+]
 asset_list = [
     "FAN-01", "FAN-02", "FAN-03", "FAN-04", "FAN-05",
     "FAN-21", "FAN-22", "FAN-23", "FAN-24", "FAN-25",
@@ -36,14 +41,21 @@ async def post_alert(alert: Alert):
         r.raise_for_status()
         return r.json()
 
+
+def random_alert() -> Alert:
+    condition_id, condition_name, message = random.choice(conditions)
+    return Alert(
+        asset_id=random.choice(asset_list),
+        condition_id=condition_id,
+        condition_name=condition_name,
+        message=message,
+        confidence=round(random.uniform(0.5, 0.99), 3),
+        ts=datetime.now().timestamp(),
+    )
+
 async def schedule_sender():
     while not stop_event.is_set():
-        alert = Alert(
-            asset_id=random.choice(asset_list),
-            severity=random.choice(severity_list),
-            message=random.choice(message_list),
-            ts=datetime.now().timestamp(),
-        )
+        alert = random_alert()
         try:
             resp = await post_alert(alert)
             print(f"[{datetime.now().isoformat()}] sent: {resp}")
@@ -73,12 +85,7 @@ def health():
 @app.post("/send-now")
 async def send_now(alert: Alert | None = None):
     """Trigger an immediate alert send. Optional JSON overrides."""
-    alert = alert or Alert(
-        asset_id="FAN-"+str(random.randint(1, 100)),
-        severity=random.choice(severity_list),
-        message=random.choice(message_list),
-        ts=datetime.now().timestamp(),
-    )
+    alert = alert or random_alert()
     try:
         resp = await post_alert(alert)
         return {"status": "sent", "response": resp}

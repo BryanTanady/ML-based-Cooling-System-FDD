@@ -4,7 +4,7 @@ export function useAlerts() {
   const alerts = ref([])
   const status = ref('disconnected') // disconnected | connecting | connected | error
   const current = ref(null)
-  const url = 'ws://localhost:8000/ws/alerts' //change as needed
+  const url = 'ws://localhost:8001/ws/alerts' //change as needed
 
   // websocket connection
   let ws = null
@@ -32,14 +32,25 @@ export function useAlerts() {
           const raw = JSON.parse(evt.data)
           const payload = {
             asset_id: raw.asset_id || 'Unknown asset',
+            condition_id: Number.isInteger(raw.condition_id) ? raw.condition_id : null,
+            condition_name: raw.condition_name || 'UNKNOWN',
             message: raw.message || 'Unknown alert',
+            confidence: Number.isFinite(raw.confidence) ? raw.confidence : null,
             ts: raw.ts || Date.now(),
             count: raw.count || 0,
           }
           alerts.value.unshift(payload)
           current.value = payload
         } catch (e) {
-          const fallback = { asset_id: 'Unknown asset', message: String(evt.data), ts: Date.now() }
+          const fallback = {
+            asset_id: 'Unknown asset',
+            condition_id: null,
+            condition_name: 'UNKNOWN',
+            message: String(evt.data),
+            confidence: null,
+            ts: Date.now(),
+            count: 0,
+          }
           alerts.value.unshift(fallback)
           current.value = fallback
         }

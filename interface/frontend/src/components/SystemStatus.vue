@@ -2,21 +2,14 @@
   <div class="system-status">
     <h3>System Status / Active Faults</h3>
     <div class="fault-breakdown">
-      <div class="fault-item Fan_Blocked">
-        <span class="fault-label">Fan Blocked</span>
-        <span class="fault-count">{{ faultCounts.Fan_Blocked }}</span>
-      </div>  
-      <div class="fault-item Fan_Blade_Issue">
-        <span class="fault-label">Fan Blade Issue</span>
-        <span class="fault-count">{{ faultCounts.Fan_Blade_Issue }}</span>
-      </div>  
-      <div class="fault-item Electrical_Fault">
-        <span class="fault-label">Electrical Fault</span>
-        <span class="fault-count">{{ faultCounts.Electrical_Fault }}</span>
-      </div>  
-      <div class="fault-item Unknown">
-        <span class="fault-label">Unknown</span>
-        <span class="fault-count">{{ faultCounts.Unknown }}</span>
+      <div
+        v-for="fault in faultDefs"
+        :key="fault.key"
+        class="fault-item"
+        :class="fault.key"
+      >
+        <span class="fault-label">{{ fault.label }}</span>
+        <span class="fault-count">{{ faultCounts[fault.key] }}</span>
       </div>
     </div>
   </div>
@@ -24,26 +17,38 @@
 
 <script setup>
 import { computed } from 'vue'
-import { useAlerts } from '@/composables/useAlerts'
-const { alerts } = useAlerts()
 
-// Count alerts by fault type
+const props = defineProps({
+  alerts: {
+    type: Array,
+    default: () => [],
+  },
+})
+
+const faultDefs = [
+  { key: 'BLOCKED_AIRFLOW', label: 'Blocked Airflow' },
+  { key: 'BLADE_ISSUE', label: 'Blade Issue' },
+  { key: 'POWER_ISSUE', label: 'Power Issue' },
+  { key: 'UNKNOWN', label: 'Unknown' },
+]
+
 const faultCounts = computed(() => {
-  const counts = { 'Fan_Blocked': 0, 'Fan_Blade_Issue': 0, 'Electrical_Fault': 0, 'Unknown': 0 }
-  alerts.value.forEach(alert => {
-    if (alert.message.includes('Fan Blocked')) {
-      counts['Fan_Blocked']++
-    } else if (alert.message.includes('Fan Blade Issue')) {
-      counts['Fan_Blade_Issue']++
-    } else if (alert.message.includes('Electrical Fault')) {
-      counts['Electrical_Fault']++
+  const counts = {
+    BLOCKED_AIRFLOW: 0,
+    BLADE_ISSUE: 0,
+    POWER_ISSUE: 0,
+    UNKNOWN: 0,
+  }
+  props.alerts.forEach((alert) => {
+    const key = typeof alert.condition_name === 'string' ? alert.condition_name : 'UNKNOWN'
+    if (Object.prototype.hasOwnProperty.call(counts, key)) {
+      counts[key] += 1
     } else {
-      counts['Unknown']++
+      counts.UNKNOWN += 1
     }
   })
   return counts
 })
-
 
 </script>
 
@@ -79,19 +84,19 @@ const faultCounts = computed(() => {
   box-shadow: 0 1px 3px rgba(0,0,0,0.1);
 }
 
-.fault-item.Fan_Blocked {
+.fault-item.BLOCKED_AIRFLOW {
   border-left-color: #0000FF;
 }
 
-.fault-item.Fan_Blade_Issue {
+.fault-item.BLADE_ISSUE {
   border-left-color: #4caf50;
 }
 
-.fault-item.Electrical_Fault {
+.fault-item.POWER_ISSUE {
   border-left-color: #ff9800;
 }
 
-.fault-item.Unknown {
+.fault-item.UNKNOWN {
   border-left-color: #f44336;
 }
 
@@ -109,22 +114,22 @@ const faultCounts = computed(() => {
   text-align: center;
 }
 
-.fault-item.Fan_Blocked .fault-count {
+.fault-item.BLOCKED_AIRFLOW .fault-count {
   background: #0000FF;
   color: white;
 }
 
-.fault-item.Fan_Blade_Issue .fault-count {
+.fault-item.BLADE_ISSUE .fault-count {
   background: #4caf50;
   color: white;
 }
 
-.fault-item.Electrical_Fault .fault-count {
+.fault-item.POWER_ISSUE .fault-count {
   background: #ff9800;
   color: white;
 }
 
-.fault-item.Unknown .fault-count {
+.fault-item.UNKNOWN .fault-count {
   background: #f44336;
   color: white;
 }

@@ -14,7 +14,7 @@ FRONTEND_PID=$!
 # --- BACKEND ---
 echo "[run.sh] Starting backend (uvicorn)..."
 cd "$ROOT_DIR/backend"
-uvicorn server:app --reload --port 8000 --host 127.0.0.1 &
+uvicorn server:app --reload --port 8001 --host 127.0.0.1 &
 BACKEND_PID=$!
 
 echo "[run.sh] Frontend PID: $FRONTEND_PID"
@@ -28,7 +28,7 @@ cleanup() {
   kill "$FRONTEND_PID" 2>/dev/null || true
 
   # Kill backend server
-  lsof -t -i :8000 | xargs kill -9
+  lsof -t -i :8001 | xargs kill -9
 
   exit 0
 }
