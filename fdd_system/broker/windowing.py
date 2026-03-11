@@ -7,8 +7,7 @@ from typing import Deque, Optional, Tuple
 
 import numpy as np
 
-from fdd_system.ML.common.config.data import RawAccWindow
-from fdd_system.ML.common.config.system import SensorConfig
+from fdd_system.ML.common.config import RawAccWindow, SensorConfig
 
 
 class WindowBuilder:

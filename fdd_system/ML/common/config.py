@@ -4,6 +4,18 @@ import numpy as np
 from typing import Optional
 import pandas as pd
 
+
+"""This file stores all configs for system components, such as fan, sensor (how the buffer is structured), etc."""
+
+class FanConfig():
+    NUM_BLADES = 5
+
+class SensorConfig():
+    SAMPLING_RATE = 800
+    WINDOW_SIZE = 1000
+    STRIDE = 500
+
+    
 @dataclass(kw_only=True)
 class RawInput:
     """Base class for any raw input. Currently this seems useless, but we need to
@@ -63,3 +75,12 @@ class RawAccWindow(RawInput):
         )
 
     
+"""Define fault types recognized by the system"""
+from enum import Enum
+
+class OperatingCondition(Enum):
+    """Operating condtiions recognized by the system."""
+    NORMAL = 0
+    BLOCKED_AIRFLOW = 1
+    BLADE_ISSUE = 2
+    UNKNOWN = 3

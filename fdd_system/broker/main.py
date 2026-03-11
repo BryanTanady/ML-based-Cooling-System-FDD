@@ -31,8 +31,7 @@ from typing import Deque
 import serial
 
 from data_collection.binary_protocol import ADXLBinaryParser
-from fdd_system.ML.common.config.operating_types import OperatingCondition
-from fdd_system.ML.common.config.system import SensorConfig
+from fdd_system.ML.common.config import OperatingCondition, SensorConfig
 from fdd_system.broker.SerialReader import SerialReader
 from fdd_system.broker.alerts import AlertSender
 from fdd_system.broker.parsing import parse_sample

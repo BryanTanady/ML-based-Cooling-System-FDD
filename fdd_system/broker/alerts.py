@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 
 import numpy as np
 
-from fdd_system.ML.common.config.operating_types import OperatingCondition
+from fdd_system.ML.common.config import OperatingCondition
 
 def _condition_to_message(condition: OperatingCondition | None) -> str:
     if condition is None:

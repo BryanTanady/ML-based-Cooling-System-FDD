@@ -12,14 +12,14 @@ try:
 except ImportError:  # pragma: no cover - exercised by runtime environment
     joblib = None
 
-from fdd_system.ML.common.classification.embedder import (
+from fdd_system.ML.common.embedder import (
     MLEmbedder1,
     MLEmbedder2,
     Raw1DCNNEmbedder,
     Spectrogram2DEmbedder,
 )
-from fdd_system.ML.common.classification.inferrer import OnnxInferrer, SklearnMLInferrer
-from fdd_system.ML.common.classification.preprocessor import (
+from fdd_system.ML.common.inferrer import OnnxInferrer, SklearnMLInferrer
+from fdd_system.ML.common.preprocessor import (
     DummyPreprocessor,
     MedianRemoval,
     RMSNormalization,

@@ -8,7 +8,7 @@ from collections import Counter
 
 import numpy as np
 
-from fdd_system.ML.common.config.operating_types import OperatingCondition
+from fdd_system.ML.common.config import OperatingCondition
 from fdd_system.broker.alerts import AlertSender
 
 
