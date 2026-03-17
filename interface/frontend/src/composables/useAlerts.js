@@ -5,6 +5,8 @@ export function useAlerts() {
   const { acknowledgeFaultPeriod } = useApi()
 
   const alerts = ref([])
+  const rawAlerts = ref([])
+  const MAX_RAW_ALERTS = 2000
   const status = ref('disconnected') // disconnected | connecting | connected | error
   const current = ref(null)
 
@@ -128,19 +130,34 @@ export function useAlerts() {
         try {
           const raw = JSON.parse(evt.data)
 
-          const payload = {
-            type: raw.type || 'Unknown type',
-            id: raw.id || 'Unknown id',
-            asset_id: raw.asset_id || 'Unknown asset',
-            // what we show in UI
-            fault_type: raw.fault_type || 'UNKNOWN',
-            start_ts: raw.start_ts || 'Unknown start time',
+          if (raw.type === 'raw_alert') {
+            const entry = {
+              asset_id: raw.asset_id ?? '',
+              condition_id: raw.condition_id,
+              condition_name: raw.condition_name ?? '',
+              message: raw.message ?? '',
+              confidence: raw.confidence,
+              ts: raw.ts,
+            }
+            rawAlerts.value.unshift(entry)
+            if (rawAlerts.value.length > MAX_RAW_ALERTS) {
+              rawAlerts.value = rawAlerts.value.slice(0, MAX_RAW_ALERTS)
+            }
+            return
           }
 
-          alerts.value.unshift(payload)
-
-          if (!current.value) {
-            current.value = payload
+          if (raw.type === 'fault_period' || !raw.type) {
+            const payload = {
+              type: raw.type || 'fault_period',
+              id: raw.id || 'Unknown id',
+              asset_id: raw.asset_id || 'Unknown asset',
+              fault_type: raw.fault_type || 'UNKNOWN',
+              start_ts: raw.start_ts || 'Unknown start time',
+            }
+            alerts.value.unshift(payload)
+            if (!current.value) {
+              current.value = payload
+            }
           }
         } catch (e) {
           console.error('Error parsing WebSocket message:', e)
@@ -171,6 +188,7 @@ export function useAlerts() {
 
   return {
     alerts,
+    rawAlerts,
     status,
     currentAlert: current,
     closeCurrent,

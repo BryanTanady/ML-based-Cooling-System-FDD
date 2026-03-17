@@ -65,6 +65,18 @@ async def receive_alert(alert: Alert):
         # DUMPING RAW DATA TO DB
         db.insert_alert(payload)
 
+        # Broadcast raw alert to all connected clients (for graph / raw event stream)
+        raw_msg = {
+            "type": "raw_alert",
+            "asset_id": payload.asset_id,
+            "condition_id": getattr(payload, "condition_id", None),
+            "condition_name": getattr(payload, "condition_name", None),
+            "message": payload.message,
+            "confidence": getattr(payload, "confidence", None),
+            "ts": getattr(payload, "ts", None),
+        }
+        await manager.broadcast(json.dumps(raw_msg))
+
         # Update fault state: on start → insert DB + broadcast; on end → update end_ts by id
         def on_fault_period_end(fault_id: str, end_ts: float):
             db.update_fault_period_end(fault_id, end_ts)
@@ -79,6 +91,7 @@ async def receive_alert(alert: Alert):
                 fault_started["start_ts"],
             )
             message = {
+                "type": "fault_period",
                 "id": fault_started["id"],
                 "asset_id": fault_started["asset_id"],
                 "fault_type": fault_started["fault_type"],

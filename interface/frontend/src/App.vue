@@ -6,7 +6,7 @@ import SystemStatus from './components/SystemStatus.vue'
 import { useAlerts } from '@/composables/useAlerts'
 import { useApi } from '@/composables/api'
 
-const { alerts, status, acknowledgeAlert } = useAlerts()
+const { alerts, rawAlerts, status, acknowledgeAlert } = useAlerts()
 const { getFaultHistory, getRawAlerts } = useApi()
 
 const currentSection = ref('Overview')
@@ -14,10 +14,10 @@ const faultHistory = ref([])
 const loadingFaultHistory = ref(false)
 const faultHistoryError = ref(null)
 
-// Raw alerts for export
-const rawAlerts = ref([])
-const loadingRawAlerts = ref(false)
-const rawAlertsError = ref(null)
+// Raw alerts fetched for Export tab (from API)
+const exportRawAlerts = ref([])
+const loadingExportRawAlerts = ref(false)
+const exportRawAlertsError = ref(null)
 
 // Filter state for Fault History
 const selectedFanId = ref('')
@@ -83,17 +83,17 @@ const exportData = computed(() => {
 })
 
 const uniqueRawAssetIds = computed(() => {
-  const ids = [...new Set(rawAlerts.value.map(a => a.asset_id).filter(Boolean))]
+  const ids = [...new Set(exportRawAlerts.value.map(a => a.asset_id).filter(Boolean))]
   return ids.sort()
 })
 
 const uniqueRawConditions = computed(() => {
-  const conds = [...new Set(rawAlerts.value.map(a => a.condition_name || a.message).filter(Boolean))]
+  const conds = [...new Set(exportRawAlerts.value.map(a => a.condition_name || a.message).filter(Boolean))]
   return conds.sort()
 })
 
 const exportRawData = computed(() => {
-  return rawAlerts.value.filter(a => {
+  return exportRawAlerts.value.filter(a => {
     const matchesFanId = !exportFanId.value || a.asset_id === exportFanId.value
     const cond = a.condition_name || a.message || ''
     const matchesFaultType = !exportFaultType.value || cond === exportFaultType.value
@@ -219,17 +219,17 @@ watch(currentSection, async (newSection) => {
 
 watch(currentSection, async (newSection) => {
   if (newSection !== 'Export') return
-  if (rawAlerts.value.length > 0 || loadingRawAlerts.value) return
+  if (exportRawAlerts.value.length > 0 || loadingExportRawAlerts.value) return
 
-  loadingRawAlerts.value = true
-  rawAlertsError.value = null
+  loadingExportRawAlerts.value = true
+  exportRawAlertsError.value = null
   try {
-    rawAlerts.value = await getRawAlerts()
+    exportRawAlerts.value = await getRawAlerts()
   } catch (error) {
-    rawAlertsError.value = 'Failed to load raw alerts'
+    exportRawAlertsError.value = 'Failed to load raw alerts'
     console.error('Error loading raw alerts:', error)
   } finally {
-    loadingRawAlerts.value = false
+    loadingExportRawAlerts.value = false
   }
 })
 </script>
@@ -255,7 +255,7 @@ watch(currentSection, async (newSection) => {
       <div class="section-context">
         <!-- Overview Section -->
         <template v-if="currentSection === 'Overview'">
-          <AlertsList :alerts="alerts" :acknowledge-alert="acknowledgeAlert" class="alerts-list"/>
+          <AlertsList :alerts="alerts" :raw-alerts="rawAlerts" :acknowledge-alert="acknowledgeAlert" class="alerts-list"/>
           <SystemStatus :alerts="alerts" class="system-status"/>
         </template>
         
@@ -365,13 +365,13 @@ watch(currentSection, async (newSection) => {
         <!-- Export Section -->
         <template v-else-if="currentSection === 'Export'">
           <div class="export-section">
-            <div v-if="loadingFaultHistory || loadingRawAlerts" class="loading">
+            <div v-if="loadingFaultHistory || loadingExportRawAlerts" class="loading">
               <p>Loading data...</p>
             </div>
-            <div v-else-if="faultHistoryError || rawAlertsError" class="error">
-              <p>{{ faultHistoryError || rawAlertsError }}</p>
+            <div v-else-if="faultHistoryError || exportRawAlertsError" class="error">
+              <p>{{ faultHistoryError || exportRawAlertsError }}</p>
             </div>
-            <div v-else-if="faultHistory.length === 0 && rawAlerts.length === 0" class="no-data">
+            <div v-else-if="faultHistory.length === 0 && exportRawAlerts.length === 0" class="no-data">
               <p>No data available to export.</p>
             </div>
             <div v-else>
@@ -441,7 +441,7 @@ watch(currentSection, async (newSection) => {
               <div class="export-info">
                 <div class="export-stats">
                   <p v-if="exportMode === 'fault_periods'"><strong>Records to export:</strong> {{ exportData.length }} of {{ faultHistory.length }}</p>
-                  <p v-else><strong>Records to export:</strong> {{ exportRawData.length }} of {{ rawAlerts.length }}</p>
+                  <p v-else><strong>Records to export:</strong> {{ exportRawData.length }} of {{ exportRawAlerts.length }}</p>
                   <p v-if="exportFanId" class="filter-info">• Filtered by Fan ID: {{ exportFanId }}</p>
                   <p v-if="exportFaultType" class="filter-info">• Filtered by Fault Type: {{ exportFaultType }}</p>
                 </div>
