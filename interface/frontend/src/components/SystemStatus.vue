@@ -3,19 +3,19 @@
     <h3>System Status / Active Faults</h3>
     <div class="fault-breakdown">
       <div class="fault-item Fan_Blocked">
-        <span class="fault-label">Fan Blocked</span>
+        <span class="fault-label">BLOCKED_AIRFLOW</span>
         <span class="fault-count">{{ faultCounts.Fan_Blocked }}</span>
       </div>  
       <div class="fault-item Fan_Blade_Issue">
-        <span class="fault-label">Fan Blade Issue</span>
+        <span class="fault-label">BLADE_ISSUE</span>
         <span class="fault-count">{{ faultCounts.Fan_Blade_Issue }}</span>
       </div>  
       <div class="fault-item Electrical_Fault">
-        <span class="fault-label">Electrical Fault</span>
+        <span class="fault-label">POWER_ISSUE</span>
         <span class="fault-count">{{ faultCounts.Electrical_Fault }}</span>
       </div>  
       <div class="fault-item Unknown">
-        <span class="fault-label">Unknown</span>
+        <span class="fault-label">UNKNOWN</span>
         <span class="fault-count">{{ faultCounts.Unknown }}</span>
       </div>
     </div>
@@ -34,16 +34,17 @@ const props = defineProps({
 })
 
 const faultCounts = computed(() => {
-  const counts = { 'Fan_Blocked': 0, 'Fan_Blade_Issue': 0, 'Electrical_Fault': 0, 'Unknown': 0 }
+  const counts = { Fan_Blocked: 0, Fan_Blade_Issue: 0, Electrical_Fault: 0, Unknown: 0 }
   props.alerts.forEach(alert => {
-    if (alert.message.includes('Fan Blocked')) {
-      counts['Fan_Blocked']++
-    } else if (alert.message.includes('Fan Blade Issue')) {
-      counts['Fan_Blade_Issue']++
-    } else if (alert.message.includes('Electrical Fault')) {
-      counts['Electrical_Fault']++
+    const code = alert?.fault_type_code || alert?.fault_type
+    if (code === 'BLOCKED_AIRFLOW') {
+      counts.Fan_Blocked++
+    } else if (code === 'BLADE_ISSUE') {
+      counts.Fan_Blade_Issue++
+    } else if (code === 'POWER_ISSUE') {
+      counts.Electrical_Fault++
     } else {
-      counts['Unknown']++
+      counts.Unknown++
     }
   })
   return counts

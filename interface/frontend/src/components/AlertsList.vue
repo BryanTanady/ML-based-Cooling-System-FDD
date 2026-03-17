@@ -9,14 +9,14 @@
         v-for="(alert, index) in alerts" 
         :key="index" 
         class="alert-item"
-        :class="getFaultType(alert.message)"
+        :class="getFaultClass(alert)"
       >
         <div class="alert-header">
           <span class="alert-asset">{{ alert.asset_id }}</span>
         </div>
-        <div class="alert-message">{{ alert.message }}</div>
+        <div class="alert-message">{{ alert.fault_type }}</div>
         <div class="alert-footer">
-          <span class="alert-time">{{ formatTime(alert.ts) }}</span>
+          <span class="alert-time">{{ formatTime(alert.start_ts) }}</span>
         </div>
         <div class="alert-actions">
           <button @click="acknowledgeAlert(index)" class="acknowledge-btn">
@@ -46,18 +46,12 @@ const formatTime = (ts) => {
   return new Date(timestamp).toLocaleString()
 }
 
-// Determine fault type from alert message
-const getFaultType = (message) => {
-  if (!message) return 'Unknown'
-  if (message.includes('Fan Blocked')) {
-    return 'Fan_Blocked'
-  } else if (message.includes('Fan Blade Issue')) {
-    return 'Fan_Blade_Issue'
-  } else if (message.includes('Electrical Fault')) {
-    return 'Electrical_Fault'
-  } else {
-    return 'Unknown'
-  }
+const getFaultClass = (alert) => {
+  const code = alert.fault_type || 'Unknown'
+  if (code === 'BLOCKED_AIRFLOW') return 'Fan_Blocked'
+  if (code === 'BLADE_ISSUE') return 'Fan_Blade_Issue'
+  if (code === 'POWER_ISSUE') return 'Electrical_Fault'
+  return 'Unknown'
 }
 
 </script>
