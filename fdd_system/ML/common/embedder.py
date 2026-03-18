@@ -271,7 +271,7 @@ class MLEmbedder2(Embedder):
         self.harmonic_bw_ratio = harmonic_bw_ratio
         self.stft_nperseg = stft_nperseg
         self.stft_noverlap = stft_noverlap
-        self.baseline_stats = dict(baseline_stats) if baseline_stats else {}
+        self.baseline_stats = self._normalize_baseline_stats(baseline_stats)
         self._harmonics = (1, 2)
         self._eps = 1e-12
         self.feat_names: list[str] = []
@@ -631,6 +631,35 @@ class MLEmbedder2(Embedder):
             feats[f"{name}_z"] = float(delta / (std + self._eps))
 
         return feats
+
+    def _normalize_baseline_stats(
+        self,
+        baseline_stats: Mapping[int | None, Mapping[str, tuple[float, float]]] | None,
+    ) -> dict[int | None, dict[str, tuple[float, float]]]:
+        if not baseline_stats:
+            return {}
+
+        normalized: dict[int | None, dict[str, tuple[float, float]]] = {}
+        for raw_device_id, stats in baseline_stats.items():
+            device_id: int | None
+            if raw_device_id in {None, "default", "none", "null"}:
+                device_id = None
+            elif isinstance(raw_device_id, str) and raw_device_id.isdigit():
+                device_id = int(raw_device_id)
+            else:
+                device_id = raw_device_id  # type: ignore[assignment]
+
+            normalized_stats: dict[str, tuple[float, float]] = {}
+            for name, value in stats.items():
+                if isinstance(value, (tuple, list)) and len(value) >= 2:
+                    mean = float(value[0])
+                    std = float(value[1])
+                else:
+                    mean = float(value)  # type: ignore[arg-type]
+                    std = 0.0
+                normalized_stats[str(name)] = (mean, std)
+            normalized[device_id] = normalized_stats
+        return normalized
 
 class Spectrogram2DEmbedder(Embedder):
     """

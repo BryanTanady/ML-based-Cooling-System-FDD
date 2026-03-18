@@ -12,6 +12,7 @@ try:
 except ImportError:  # pragma: no cover - exercised by runtime environment
     joblib = None
 
+from fdd_system.ML.common.anomaly_detector import load_anomaly_detector
 from fdd_system.ML.common.embedder import (
     MLEmbedder1,
     MLEmbedder2,
@@ -20,12 +21,14 @@ from fdd_system.ML.common.embedder import (
 )
 from fdd_system.ML.common.inferrer import OnnxInferrer, SklearnMLInferrer
 from fdd_system.ML.common.preprocessor import (
+    CalibrationZNormalizer,
     DummyPreprocessor,
     MedianRemoval,
     RMSNormalization,
     StandardZNormal,
 )
 from fdd_system.ML.inference.classification_pipeline import ClassificationPipeline
+from fdd_system.ML.inference.known_unknown_pipeline import KnownUnknownClassificationPipeline
 
 
 def _resolve_model_format(model_path: str, requested_format: str = "auto") -> str:
@@ -38,7 +41,7 @@ def _resolve_model_format(model_path: str, requested_format: str = "auto") -> st
     return "sklearn"
 
 
-def _load_onnx_metadata(model_path: str) -> dict[str, Any] | None:
+def _load_model_metadata(model_path: str) -> dict[str, Any] | None:
     sidecar = Path(model_path).with_suffix(".meta.json")
     if not sidecar.exists():
         return None
@@ -55,17 +58,19 @@ def _load_onnx_metadata(model_path: str) -> dict[str, Any] | None:
 
 
 def _build_embedder(embedder_name: str, *, metadata: dict[str, Any] | None = None):
-    if embedder_name == "ml1":
-        return MLEmbedder1()
-    if embedder_name == "ml2":
-        return MLEmbedder2(highpass_hz=10)
-
     kwargs: dict[str, Any] = {}
     embedder_meta = metadata.get("embedder", {}) if metadata else {}
     if isinstance(embedder_meta, dict):
         maybe_kwargs = embedder_meta.get("kwargs", {})
         if isinstance(maybe_kwargs, dict):
             kwargs = dict(maybe_kwargs)
+
+    if embedder_name == "ml1":
+        return MLEmbedder1()
+    if embedder_name == "ml2":
+        if "highpass_hz" not in kwargs:
+            kwargs["highpass_hz"] = 10
+        return MLEmbedder2(**kwargs)
 
     if embedder_name == "spectrogram2d":
         return Spectrogram2DEmbedder(**kwargs)
@@ -79,12 +84,26 @@ def _build_preprocessor(preprocessor_name: str, *, metadata: dict[str, Any] | No
     kwargs: dict[str, Any] = {}
     pre_meta = metadata.get("preprocessor", {}) if metadata else {}
     if isinstance(pre_meta, dict):
+        meta_name = pre_meta.get("name")
         maybe_kwargs = pre_meta.get("kwargs", {})
-        if isinstance(maybe_kwargs, dict):
-            kwargs = dict(maybe_kwargs)
+        if isinstance(meta_name, str) and isinstance(maybe_kwargs, dict):
+            compatible_names = {
+                "basic": {"basic", "median"},
+                "median": {"basic", "median"},
+                "calibration": {"calibration", "calibration_z"},
+                "calibration_z": {"calibration", "calibration_z"},
+                "dummy": {"dummy"},
+                "robust": {"robust", "standard"},
+                "standard": {"robust", "standard"},
+                "rms": {"rms"},
+            }
+            if meta_name in compatible_names.get(preprocessor_name, {preprocessor_name}):
+                kwargs = dict(maybe_kwargs)
 
     if preprocessor_name in {"basic", "median"}:
         return MedianRemoval()
+    if preprocessor_name in {"calibration", "calibration_z"}:
+        return CalibrationZNormalizer(**kwargs)
     if preprocessor_name == "dummy":
         return DummyPreprocessor()
     if preprocessor_name in {"robust", "standard"}:
@@ -118,10 +137,11 @@ def build_pipeline(
     model_format: str = "auto",
     embedder: str = "auto",
     preprocessor: str = "auto",
-) -> ClassificationPipeline:
+    anomaly_detector_path: str | None = None,
+) -> ClassificationPipeline | KnownUnknownClassificationPipeline:
     """Construct the end-to-end classification pipeline."""
     resolved_model_format = _resolve_model_format(model_path, model_format)
-    metadata = _load_onnx_metadata(model_path) if resolved_model_format == "onnx" else None
+    metadata = _load_model_metadata(model_path)
 
     if embedder == "auto":
         embedder_name = "ml2" if resolved_model_format == "sklearn" else "spectrogram2d"
@@ -143,4 +163,10 @@ def build_pipeline(
     pre = _build_preprocessor(preprocessor_name, metadata=metadata)
     emb = _build_embedder(embedder_name, metadata=metadata)
     inf = OnnxInferrer(model) if resolved_model_format == "onnx" else SklearnMLInferrer(model)
-    return ClassificationPipeline(pre, emb, inf)
+    classifier_pipeline = ClassificationPipeline(pre, emb, inf)
+
+    if anomaly_detector_path is None:
+        return classifier_pipeline
+
+    anomaly_detector = load_anomaly_detector(anomaly_detector_path)
+    return KnownUnknownClassificationPipeline(classifier_pipeline, anomaly_detector)

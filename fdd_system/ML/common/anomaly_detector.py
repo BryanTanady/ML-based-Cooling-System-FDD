@@ -20,6 +20,7 @@ except ImportError:  # pragma: no cover - exercised by runtime environment
 from fdd_system.ML.common.config import OperatingCondition, RawAccWindow
 from fdd_system.ML.common.embedder import Raw1DCNNEmbedder
 from fdd_system.ML.common.preprocessor import (
+    CalibrationZNormalizer,
     DummyPreprocessor,
     MedianRemoval,
     Preprocessor,
@@ -37,6 +38,10 @@ DEFAULT_MAX_PROTOTYPES_PER_CLASS = 6
 DEFAULT_MIN_WINDOWS_PER_PROTOTYPE = 30
 DEFAULT_MIN_SILHOUETTE_FOR_SPLIT = 0.05
 DEFAULT_KMEANS_N_INIT = 10
+DEFAULT_RUNTIME_GATE_DISTANCE_Q = 0.99
+DEFAULT_RUNTIME_GATE_DISTANCE_MARGIN = 1.10
+DEFAULT_RUNTIME_GATE_AMBIGUITY_Q = 0.99
+DEFAULT_RUNTIME_GATE_AMBIGUITY_SLACK = 0.05
 
 
 def _require_torch():
@@ -639,21 +644,37 @@ def gate_decision_confidence(
     known_margin = np.minimum(1.0 - distance_scale, 1.0 - ambiguity_scale)
     decision_margin = np.where(is_unknown, unknown_margin, known_margin)
 
-    conf = 1.0 / (1.0 + np.exp(-4.0 * decision_margin))
+    # Clamp logits before exp() so highly separated samples saturate cleanly
+    # without emitting overflow warnings.
+    logits = np.clip(np.asarray(decision_margin, dtype=np.float64) * 4.0, -60.0, 60.0)
+    conf = 1.0 / (1.0 + np.exp(-logits))
     conf = np.nan_to_num(conf, nan=0.0, posinf=1.0, neginf=0.0)
     return np.clip(conf.astype(np.float32), 0.0, 1.0)
 
 
-def _make_preprocessor(name: str) -> Preprocessor:
+def _infer_preprocessor_kwargs(preprocessor: Preprocessor | None, kwargs: Mapping[str, Any] | None) -> dict[str, Any]:
+    if kwargs:
+        return {str(k): v for k, v in kwargs.items()}
+    if preprocessor is not None and hasattr(preprocessor, "export_kwargs"):
+        exported = preprocessor.export_kwargs()
+        if isinstance(exported, Mapping):
+            return {str(k): v for k, v in exported.items()}
+    return {}
+
+
+def _make_preprocessor(name: str, kwargs: Mapping[str, Any] | None = None) -> Preprocessor:
     normalized = name.strip().lower()
+    init_kwargs = dict(kwargs or {})
     if normalized in {"basic", "median"}:
         return MedianRemoval()
+    if normalized in {"calibration", "calibration_z"}:
+        return CalibrationZNormalizer(**init_kwargs)
     if normalized == "dummy":
         return DummyPreprocessor()
     if normalized in {"robust", "standard"}:
-        return StandardZNormal()
+        return StandardZNormal(**init_kwargs)
     if normalized == "rms":
-        return RMSNormalization()
+        return RMSNormalization(**init_kwargs)
     raise ValueError(f"Unknown anomaly-detector preprocessor '{name}'.")
 
 
@@ -730,6 +751,7 @@ def serialize_mahalanobis_gatekeeper(
     std: np.ndarray,
     window_len: int,
     preprocessor_name: str = "rms",
+    preprocessor_kwargs: Mapping[str, Any] | None = None,
     batch_size: int | None = None,
 ) -> dict[str, Any]:
     encoder = bundle["encoder"]
@@ -759,6 +781,9 @@ def serialize_mahalanobis_gatekeeper(
         "std": np.asarray(std, dtype=np.float32),
         "window_len": int(window_len),
         "preprocessor_name": str(preprocessor_name),
+        "preprocessor_kwargs": _normalize_nested_scalars(
+            _infer_preprocessor_kwargs(None, preprocessor_kwargs or bundle.get("preprocessor_kwargs"))
+        ),
         "batch_size": int(batch_size or bundle.get("batch_size", DEFAULT_BATCH_SIZE)),
     }
 
@@ -771,6 +796,7 @@ def save_mahalanobis_gatekeeper(
     std: np.ndarray,
     window_len: int,
     preprocessor_name: str = "rms",
+    preprocessor_kwargs: Mapping[str, Any] | None = None,
     batch_size: int | None = None,
 ) -> Path:
     artifact = serialize_mahalanobis_gatekeeper(
@@ -779,6 +805,7 @@ def save_mahalanobis_gatekeeper(
         std=std,
         window_len=window_len,
         preprocessor_name=preprocessor_name,
+        preprocessor_kwargs=preprocessor_kwargs,
         batch_size=batch_size,
     )
     return save_anomaly_detector_artifact(path, artifact)
@@ -862,6 +889,7 @@ class MahalanobisAnomalyDetector:
         mean: np.ndarray | None = None,
         std: np.ndarray | None = None,
         preprocessor_name: str = "rms",
+        preprocessor_kwargs: Mapping[str, Any] | None = None,
         preprocessor: Preprocessor | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
         threshold_details: Mapping[int, Any] | None = None,
@@ -880,7 +908,10 @@ class MahalanobisAnomalyDetector:
         self.mean = None if mean is None else np.asarray(mean, dtype=np.float32)
         self.std = None if std is None else np.asarray(std, dtype=np.float32)
         self.preprocessor_name = str(preprocessor_name)
-        self.preprocessor = preprocessor or _make_preprocessor(self.preprocessor_name)
+        self.preprocessor_kwargs = _normalize_nested_scalars(
+            _infer_preprocessor_kwargs(preprocessor, preprocessor_kwargs)
+        )
+        self.preprocessor = preprocessor or _make_preprocessor(self.preprocessor_name, self.preprocessor_kwargs)
         self.batch_size = int(batch_size)
         self.threshold_details = _normalize_nested_scalars(threshold_details or {})
         self.class_prototype_details = _normalize_nested_scalars(class_prototype_details or {})
@@ -897,6 +928,7 @@ class MahalanobisAnomalyDetector:
             "fallback_threshold": self.fallback_threshold,
             "ambiguity_ratio_threshold": self.ambiguity_ratio_threshold,
             "batch_size": self.batch_size,
+            "preprocessor_kwargs": self.preprocessor_kwargs,
         }
 
     def predict(self, raw_inputs: Sequence[RawAccWindow]) -> np.ndarray:
@@ -920,6 +952,90 @@ class MahalanobisAnomalyDetector:
         )
         return details
 
+    def recalibrate_from_normal_data(
+        self,
+        raw_inputs: Sequence[RawAccWindow],
+        *,
+        distance_quantile: float = DEFAULT_RUNTIME_GATE_DISTANCE_Q,
+        distance_margin: float = DEFAULT_RUNTIME_GATE_DISTANCE_MARGIN,
+        ambiguity_quantile: float = DEFAULT_RUNTIME_GATE_AMBIGUITY_Q,
+        ambiguity_slack: float = DEFAULT_RUNTIME_GATE_AMBIGUITY_SLACK,
+    ) -> dict[str, Any]:
+        samples = list(raw_inputs)
+        if not samples:
+            raise ValueError("Runtime gate calibration requires at least one calibration window.")
+
+        distance_quantile = float(np.clip(distance_quantile, 0.0, 1.0))
+        ambiguity_quantile = float(np.clip(ambiguity_quantile, 0.0, 1.0))
+        distance_margin = max(1.0, float(distance_margin))
+        ambiguity_slack = max(0.0, float(ambiguity_slack))
+
+        processed_inputs = self.preprocessor.preprocess(samples)
+        x_np = self.raw_embedder.embed(processed_inputs)
+
+        details_before = predict_gatekeeper(self.bundle, x_np, batch_size=self.batch_size)
+        nearest_distance = np.asarray(details_before["distance"], dtype=np.float32)
+        distance_ratio = np.asarray(details_before["distance_ratio"], dtype=np.float32)
+        nearest_label = np.asarray(details_before["nearest_label"], dtype=np.int64)
+        is_unknown_before = np.asarray(details_before["is_unknown"], dtype=np.int64)
+
+        finite_distance = nearest_distance[np.isfinite(nearest_distance)]
+        if finite_distance.size == 0:
+            raise ValueError("Runtime gate calibration produced no finite nearest distances.")
+
+        finite_ratio = distance_ratio[np.isfinite(distance_ratio)]
+        observed_distance_floor = float(np.quantile(finite_distance, distance_quantile)) * distance_margin
+        observed_ratio_q = (
+            float(np.quantile(finite_ratio, ambiguity_quantile))
+            if finite_ratio.size > 0
+            else float(self.ambiguity_ratio_threshold)
+        )
+
+        old_per_class_thresholds = dict(self.per_class_thresholds)
+        old_fallback_threshold = float(self.fallback_threshold)
+        old_ambiguity_ratio_threshold = float(self.ambiguity_ratio_threshold)
+
+        self.per_class_thresholds = {
+            int(label): float(max(threshold, observed_distance_floor))
+            for label, threshold in self.per_class_thresholds.items()
+        }
+        self.fallback_threshold = float(max(self.fallback_threshold, observed_distance_floor))
+        self.ambiguity_ratio_threshold = float(
+            min(0.999, max(self.ambiguity_ratio_threshold, observed_ratio_q + ambiguity_slack))
+        )
+
+        self.bundle["per_class_thresholds"] = dict(self.per_class_thresholds)
+        self.bundle["fallback_threshold"] = float(self.fallback_threshold)
+        self.bundle["ambiguity_ratio_threshold"] = float(self.ambiguity_ratio_threshold)
+
+        details_after = predict_gatekeeper(self.bundle, x_np, batch_size=self.batch_size)
+        is_unknown_after = np.asarray(details_after["is_unknown"], dtype=np.int64)
+
+        unique_labels, label_counts = np.unique(nearest_label, return_counts=True)
+        nearest_label_counts = {
+            int(label): int(count)
+            for label, count in zip(unique_labels.tolist(), label_counts.tolist())
+        }
+
+        return {
+            "num_windows": int(nearest_distance.size),
+            "nearest_label_counts": nearest_label_counts,
+            "distance_quantile": distance_quantile,
+            "distance_margin": distance_margin,
+            "distance_floor": float(observed_distance_floor),
+            "ambiguity_quantile": ambiguity_quantile,
+            "ambiguity_ratio_quantile": float(observed_ratio_q),
+            "ambiguity_slack": float(ambiguity_slack),
+            "old_fallback_threshold": old_fallback_threshold,
+            "new_fallback_threshold": float(self.fallback_threshold),
+            "old_ambiguity_ratio_threshold": old_ambiguity_ratio_threshold,
+            "new_ambiguity_ratio_threshold": float(self.ambiguity_ratio_threshold),
+            "old_per_class_thresholds": old_per_class_thresholds,
+            "new_per_class_thresholds": dict(self.per_class_thresholds),
+            "unknown_before": int(np.sum(is_unknown_before)),
+            "unknown_after": int(np.sum(is_unknown_after)),
+        }
+
     def to_artifact(self) -> dict[str, Any]:
         return {
             **serialize_mahalanobis_gatekeeper(
@@ -932,6 +1048,7 @@ class MahalanobisAnomalyDetector:
                 std=np.ones((1, 3, 1), dtype=np.float32) if self.std is None else self.std,
                 window_len=self.window_len,
                 preprocessor_name=self.preprocessor_name,
+                preprocessor_kwargs=self.preprocessor_kwargs,
                 batch_size=self.batch_size,
             ),
         }
@@ -949,6 +1066,7 @@ class MahalanobisAnomalyDetector:
 
         preprocessor = artifact.get("preprocessor")
         preprocessor_name = str(artifact.get("preprocessor_name", "rms"))
+        preprocessor_kwargs = artifact.get("preprocessor_kwargs")
         if preprocessor is not None and not isinstance(preprocessor, Preprocessor):
             raise TypeError("Expected anomaly detector artifact 'preprocessor' to implement Preprocessor.")
 
@@ -965,6 +1083,7 @@ class MahalanobisAnomalyDetector:
             mean=artifact.get("mean"),
             std=artifact.get("std"),
             preprocessor_name=preprocessor_name,
+            preprocessor_kwargs=preprocessor_kwargs if isinstance(preprocessor_kwargs, Mapping) else None,
             preprocessor=preprocessor,
             batch_size=int(artifact.get("batch_size", DEFAULT_BATCH_SIZE)),
             threshold_details=artifact.get("threshold_details"),

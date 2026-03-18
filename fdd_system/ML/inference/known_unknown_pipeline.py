@@ -44,21 +44,5 @@ class KnownUnknownClassificationPipeline:
         class_conf = np.asarray(class_conf, dtype=float).reshape(-1)
 
         final_preds[known_indices] = class_preds
-        final_conf[known_indices] = self._combine_known_confidence(
-            gate_conf[known_indices],
-            class_conf,
-        )
+        final_conf[known_indices] = class_conf
         return final_preds, final_conf
-
-    @staticmethod
-    def _combine_known_confidence(gate_conf: np.ndarray, class_conf: np.ndarray) -> np.ndarray:
-        gate_conf = np.asarray(gate_conf, dtype=float).reshape(-1)
-        class_conf = np.asarray(class_conf, dtype=float).reshape(-1)
-
-        if gate_conf.shape != class_conf.shape:
-            raise ValueError("Gate and classifier confidence arrays must align for known samples.")
-
-        combined = gate_conf.copy()
-        valid_classifier = np.isfinite(class_conf)
-        combined[valid_classifier] = np.minimum(combined[valid_classifier], class_conf[valid_classifier])
-        return combined.astype(np.float32)
