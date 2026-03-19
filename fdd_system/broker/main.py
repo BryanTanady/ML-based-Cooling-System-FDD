@@ -452,8 +452,23 @@ def run_broker(args: argparse.Namespace) -> int:
 
         window = window_builder.add(ax, ay, az)
         if window:
-            preds, confs = pipeline.predict_with_confidence([window])
-            record_predictions(preds, confs, prediction_counts, alert_sender, log)
+            predict_details = getattr(pipeline, "predict_details", None)
+            if callable(predict_details):
+                details = predict_details([window])
+                preds = details["predictions"]
+                confs = details["confidence"]
+                record_predictions(
+                    preds,
+                    confs,
+                    prediction_counts,
+                    alert_sender,
+                    log,
+                    rejection_stage=details.get("rejection_stage"),
+                    rejection_reason=details.get("rejection_reason"),
+                )
+            else:
+                preds, confs = pipeline.predict_with_confidence([window])
+                record_predictions(preds, confs, prediction_counts, alert_sender, log)
 
     try:
         while True:

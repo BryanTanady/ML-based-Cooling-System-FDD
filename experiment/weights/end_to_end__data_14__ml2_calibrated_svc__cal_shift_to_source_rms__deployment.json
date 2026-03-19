@@ -1,0 +1,14 @@
+{
+  "run_name": "end_to_end__data_14__ml2_calibrated_svc__cal_shift_to_source_rms",
+  "dataset_name": "data_14",
+  "classifier_backend": "ml2_calibrated_svc",
+  "calibration_enabled": true,
+  "calibration_mode": "shift_to_source_rms",
+  "remove_first_second": 2.0,
+  "model_path": "/home/btanady/fourth_year/cpen491/experiment/weights/end_to_end__data_14__ml2_calibrated_svc__cal_shift_to_source_rms.joblib",
+  "model_format": "sklearn",
+  "embedder": "auto",
+  "preprocessor": "auto",
+  "anomaly_detector_path": "/home/btanady/fourth_year/cpen491/experiment/weights/end_to_end__data_14__ml2_calibrated_svc__cal_shift_to_source_rms__anomaly_gate.pt",
+  "calibration_seconds_default": 20.0
+}

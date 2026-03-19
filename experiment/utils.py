@@ -1,11 +1,10 @@
 # Training utils
+import numpy as np
 import pandas as pd
 import random
-from pathlib import Path
 from collections.abc import Mapping
 
-from fdd_system.ML.common.config.system import *
-from fdd_system.ML.common.config.data import *
+from fdd_system.ML.common.config import RawAccWindow, SensorConfig
 
 def cvt_dict_feats_to_np(dict_features: list[dict[str, float]], feature_names: list[str]) -> np.ndarray:
     return np.array([
@@ -14,7 +13,15 @@ def cvt_dict_feats_to_np(dict_features: list[dict[str, float]], feature_names: l
     ])
 
 
-def _parse_training_data(data_paths: list[str], label: int, window_size: int, stride: int, col_names: list[str]) -> list[RawAccWindow]:
+def _parse_training_data(
+    data_paths: list[str],
+    label: int,
+    window_size: int,
+    stride: int,
+    col_names: list[str],
+    *,
+    remove_first_second: float = 0.0,
+) -> list[RawAccWindow]:
     """Parse list of paths to data with same label.
     
     Args:
@@ -30,7 +37,10 @@ def _parse_training_data(data_paths: list[str], label: int, window_size: int, st
     data = []
 
     for path in data_paths:
-        x = pd.read_csv(path)        
+        x = pd.read_csv(path)
+        discard_rows = int(round(max(0.0, float(remove_first_second)) * SensorConfig.SAMPLING_RATE))
+        if discard_rows > 0:
+            x = x.iloc[min(discard_rows, len(x)) :].reset_index(drop=True)
         n = len(x)
         windowed_data = [
             RawAccWindow.from_dataframe_public_dset(x.iloc[i:i + window_size], label, col_names)
@@ -40,7 +50,13 @@ def _parse_training_data(data_paths: list[str], label: int, window_size: int, st
         data.extend(windowed_data)
     return data
 
-def prepare_training_data(training_data: Mapping[int, list[str] ], shuffle: bool, col_names: list[str]) -> list[RawAccWindow]:
+def prepare_training_data(
+    training_data: Mapping[int, list[str]],
+    shuffle: bool,
+    col_names: list[str],
+    *,
+    remove_first_second: float = 0.0,
+) -> list[RawAccWindow]:
     """Parse training data csv into list of dictionaries, each represents a single window of data.
     
     Args:
@@ -52,7 +68,16 @@ def prepare_training_data(training_data: Mapping[int, list[str] ], shuffle: bool
     """
     result = []
     for label, paths in training_data.items():
-        result.extend(_parse_training_data(paths, label, SensorConfig.WINDOW_SIZE, SensorConfig.STRIDE, col_names))
+        result.extend(
+            _parse_training_data(
+                paths,
+                label,
+                SensorConfig.WINDOW_SIZE,
+                SensorConfig.STRIDE,
+                col_names,
+                remove_first_second=remove_first_second,
+            )
+        )
 
     if shuffle:
         random.shuffle(result)

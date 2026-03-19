@@ -1,0 +1,14 @@
+{
+  "run_name": "end_to_end__data_14__cnn1d__cal_zscore",
+  "dataset_name": "data_14",
+  "classifier_backend": "cnn1d",
+  "calibration_enabled": true,
+  "calibration_mode": "zscore",
+  "remove_first_second": 2.0,
+  "model_path": "/home/btanady/fourth_year/cpen491/experiment/weights/end_to_end__data_14__cnn1d__cal_zscore.onnx",
+  "model_format": "onnx",
+  "embedder": "auto",
+  "preprocessor": "auto",
+  "anomaly_detector_path": "/home/btanady/fourth_year/cpen491/experiment/weights/end_to_end__data_14__cnn1d__cal_zscore__anomaly_gate.pt",
+  "calibration_seconds_default": 20.0
+}

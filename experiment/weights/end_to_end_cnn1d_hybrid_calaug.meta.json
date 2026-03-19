@@ -1,0 +1,34 @@
+{
+  "onnx_path": "/home/btanady/fourth_year/cpen491/experiment/weights/end_to_end_cnn1d_hybrid_calaug.onnx",
+  "input_shape": [
+    1,
+    3,
+    1000
+  ],
+  "architecture": "hybrid_timefreq",
+  "embedder": {
+    "name": "raw1dcnn",
+    "kwargs": {
+      "target_len": 1000,
+      "mean": [
+        0.07769355177879333,
+        -0.6187033653259277,
+        0.7813496589660645
+      ],
+      "std": [
+        0.019609566777944565,
+        0.022142231464385986,
+        0.0005257761804386973
+      ]
+    }
+  },
+  "preprocessor": {
+    "name": "rms",
+    "kwargs": {}
+  },
+  "labels": {
+    "0": 0,
+    "1": 1,
+    "2": 2
+  }
+}

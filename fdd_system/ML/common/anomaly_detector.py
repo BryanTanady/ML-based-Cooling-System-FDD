@@ -42,6 +42,271 @@ DEFAULT_RUNTIME_GATE_DISTANCE_Q = 0.99
 DEFAULT_RUNTIME_GATE_DISTANCE_MARGIN = 1.10
 DEFAULT_RUNTIME_GATE_AMBIGUITY_Q = 0.99
 DEFAULT_RUNTIME_GATE_AMBIGUITY_SLACK = 0.05
+DEFAULT_STAGE0_RMS_MODE = "raw"
+DEFAULT_STAGE0_RMS_LOWER_Q = 0.05
+DEFAULT_STAGE0_RMS_UPPER_Q = 0.95
+DEFAULT_STAGE0_RMS_LOWER_SCALE = 0.85
+DEFAULT_STAGE0_RMS_UPPER_SCALE = 1.15
+
+
+def _is_window_like(value: object) -> bool:
+    return hasattr(value, "acc_x") and hasattr(value, "acc_y") and hasattr(value, "acc_z")
+
+
+class Stage0WindowGuard:
+    """Reject malformed or grossly off-scale windows before model inference."""
+
+    REASON_OK = "ok"
+    REASON_WRONG_SHAPE = "wrong_shape"
+    REASON_EMPTY_WINDOW = "empty_window"
+    REASON_MISMATCHED_AXIS_LENGTHS = "mismatched_axis_lengths"
+    REASON_NAN_OR_INF = "nan_or_inf"
+    REASON_RMS_TOO_LOW = "rms_too_low"
+    REASON_RMS_TOO_HIGH = "rms_too_high"
+
+    def __init__(
+        self,
+        *,
+        expected_len: int,
+        rms_lower_bound: float | None,
+        rms_upper_bound: float | None,
+        calibration_rms_mean: float,
+        calibration_rms_std: float,
+        calibration_rms_median: float,
+        calibration_rms_lower_quantile: float,
+        calibration_rms_upper_quantile: float,
+        rms_mode: str = DEFAULT_STAGE0_RMS_MODE,
+        rms_lower_q: float = DEFAULT_STAGE0_RMS_LOWER_Q,
+        rms_upper_q: float = DEFAULT_STAGE0_RMS_UPPER_Q,
+        rms_lower_scale: float = DEFAULT_STAGE0_RMS_LOWER_SCALE,
+        rms_upper_scale: float = DEFAULT_STAGE0_RMS_UPPER_SCALE,
+    ):
+        if int(expected_len) <= 0:
+            raise ValueError("Stage0WindowGuard requires a positive expected_len.")
+
+        if rms_mode not in {"raw", "centered_window"}:
+            raise ValueError(f"Unsupported Stage0WindowGuard rms_mode '{rms_mode}'.")
+
+        lower = None if rms_lower_bound is None else float(rms_lower_bound)
+        upper = None if rms_upper_bound is None else float(rms_upper_bound)
+        if lower is None and upper is None:
+            raise ValueError("Stage0WindowGuard requires at least one RMS bound.")
+        if lower is not None and (not np.isfinite(lower) or lower < 0.0):
+            raise ValueError("Stage0WindowGuard requires a finite non-negative lower RMS bound.")
+        if upper is not None and (not np.isfinite(upper) or upper <= 0.0):
+            raise ValueError("Stage0WindowGuard requires a finite positive upper RMS bound.")
+        if lower is not None and upper is not None and lower >= upper:
+            raise ValueError("Stage0WindowGuard requires RMS bounds with lower < upper.")
+
+        self.expected_len = int(expected_len)
+        self.rms_mode = str(rms_mode)
+        self.rms_lower_bound = lower
+        self.rms_upper_bound = upper
+        self.calibration_rms_mean = float(calibration_rms_mean)
+        self.calibration_rms_std = float(calibration_rms_std)
+        self.calibration_rms_median = float(calibration_rms_median)
+        self.calibration_rms_lower_quantile = float(calibration_rms_lower_quantile)
+        self.calibration_rms_upper_quantile = float(calibration_rms_upper_quantile)
+        self.rms_lower_q = float(rms_lower_q)
+        self.rms_upper_q = float(rms_upper_q)
+        self.rms_lower_scale = float(rms_lower_scale)
+        self.rms_upper_scale = float(rms_upper_scale)
+
+    @staticmethod
+    def _window_rms(ax: np.ndarray, ay: np.ndarray, az: np.ndarray, *, mode: str) -> float:
+        if mode == "centered_window":
+            ax = ax.astype(np.float64) - float(np.mean(ax))
+            ay = ay.astype(np.float64) - float(np.mean(ay))
+            az = az.astype(np.float64) - float(np.mean(az))
+        else:
+            ax = ax.astype(np.float64)
+            ay = ay.astype(np.float64)
+            az = az.astype(np.float64)
+        signal_power = ax.astype(np.float64) ** 2 + ay.astype(np.float64) ** 2 + az.astype(np.float64) ** 2
+        return float(np.sqrt(np.mean(signal_power)))
+
+    @classmethod
+    def fit(
+        cls,
+        raw_inputs: Sequence[RawAccWindow],
+        *,
+        expected_len: int | None = None,
+        rms_mode: str = DEFAULT_STAGE0_RMS_MODE,
+        rms_lower_q: float = DEFAULT_STAGE0_RMS_LOWER_Q,
+        rms_upper_q: float = DEFAULT_STAGE0_RMS_UPPER_Q,
+        rms_lower_scale: float = DEFAULT_STAGE0_RMS_LOWER_SCALE,
+        rms_upper_scale: float = DEFAULT_STAGE0_RMS_UPPER_SCALE,
+        fit_lower_bound: bool = True,
+        fit_upper_bound: bool = True,
+    ) -> "Stage0WindowGuard":
+        valid_lengths: list[int] = []
+        valid_rms: list[float] = []
+
+        for sample in raw_inputs:
+            record = cls.inspect_sample(sample, expected_len=None, rms_mode=rms_mode)
+            if record["reason"] != cls.REASON_OK:
+                continue
+            valid_lengths.append(int(record["axis_lengths"][0]))
+            valid_rms.append(float(record["rms"]))
+
+        if not valid_lengths or not valid_rms:
+            raise ValueError("Stage0WindowGuard.fit() requires at least one valid calibration window.")
+
+        if expected_len is None:
+            lengths_np = np.asarray(valid_lengths, dtype=np.int64)
+            unique_lengths, counts = np.unique(lengths_np, return_counts=True)
+            expected_len = int(unique_lengths[np.argmax(counts)])
+
+        calibration_rms = np.asarray(
+            [rms for rms, length in zip(valid_rms, valid_lengths) if int(length) == int(expected_len)],
+            dtype=np.float64,
+        )
+        if calibration_rms.size == 0:
+            raise ValueError("Stage0WindowGuard.fit() found no valid calibration windows for the chosen length.")
+
+        rms_lower_q = float(np.clip(rms_lower_q, 0.0, 1.0))
+        rms_upper_q = float(np.clip(rms_upper_q, rms_lower_q, 1.0))
+        rms_lower_scale = float(np.clip(rms_lower_scale, 1e-6, 1.0))
+        rms_upper_scale = float(max(1.0, rms_upper_scale))
+
+        lower_quantile = float(np.quantile(calibration_rms, rms_lower_q))
+        upper_quantile = float(np.quantile(calibration_rms, rms_upper_q))
+        rms_lower_bound = max(0.0, lower_quantile * rms_lower_scale) if fit_lower_bound else None
+        rms_upper_bound = upper_quantile * rms_upper_scale if fit_upper_bound else None
+        if rms_lower_bound is None and rms_upper_bound is None:
+            raise ValueError("Stage0WindowGuard.fit() must enable at least one RMS bound.")
+        if rms_lower_bound is not None and rms_upper_bound is not None and rms_lower_bound >= rms_upper_bound:
+            raise ValueError("Stage0WindowGuard.fit() produced invalid RMS bounds.")
+
+        return cls(
+            expected_len=int(expected_len),
+            rms_lower_bound=rms_lower_bound,
+            rms_upper_bound=rms_upper_bound,
+            calibration_rms_mean=float(np.mean(calibration_rms)),
+            calibration_rms_std=float(np.std(calibration_rms)),
+            calibration_rms_median=float(np.median(calibration_rms)),
+            calibration_rms_lower_quantile=lower_quantile,
+            calibration_rms_upper_quantile=upper_quantile,
+            rms_mode=rms_mode,
+            rms_lower_q=rms_lower_q,
+            rms_upper_q=rms_upper_q,
+            rms_lower_scale=rms_lower_scale,
+            rms_upper_scale=rms_upper_scale,
+        )
+
+    @classmethod
+    def inspect_sample(
+        cls,
+        sample: object,
+        *,
+        expected_len: int | None,
+        rms_mode: str = DEFAULT_STAGE0_RMS_MODE,
+        rms_lower_bound: float | None = None,
+        rms_upper_bound: float | None = None,
+    ) -> dict[str, Any]:
+        axis_lengths = (-1, -1, -1)
+        if not _is_window_like(sample):
+            return {"accepted": False, "reason": cls.REASON_WRONG_SHAPE, "rms": float("nan"), "axis_lengths": axis_lengths}
+
+        try:
+            ax = np.asarray(sample.acc_x)
+            ay = np.asarray(sample.acc_y)
+            az = np.asarray(sample.acc_z)
+        except Exception:
+            return {"accepted": False, "reason": cls.REASON_WRONG_SHAPE, "rms": float("nan"), "axis_lengths": axis_lengths}
+
+        axis_lengths = tuple(int(arr.size) for arr in (ax, ay, az))
+        if any(arr.ndim != 1 for arr in (ax, ay, az)):
+            return {"accepted": False, "reason": cls.REASON_WRONG_SHAPE, "rms": float("nan"), "axis_lengths": axis_lengths}
+        if any(length <= 0 for length in axis_lengths):
+            return {"accepted": False, "reason": cls.REASON_EMPTY_WINDOW, "rms": float("nan"), "axis_lengths": axis_lengths}
+        if len(set(axis_lengths)) != 1:
+            return {
+                "accepted": False,
+                "reason": cls.REASON_MISMATCHED_AXIS_LENGTHS,
+                "rms": float("nan"),
+                "axis_lengths": axis_lengths,
+            }
+        if expected_len is not None and axis_lengths[0] != int(expected_len):
+            return {"accepted": False, "reason": cls.REASON_WRONG_SHAPE, "rms": float("nan"), "axis_lengths": axis_lengths}
+        if not (np.all(np.isfinite(ax)) and np.all(np.isfinite(ay)) and np.all(np.isfinite(az))):
+            return {"accepted": False, "reason": cls.REASON_NAN_OR_INF, "rms": float("nan"), "axis_lengths": axis_lengths}
+
+        rms = cls._window_rms(ax, ay, az, mode=rms_mode)
+        if not np.isfinite(rms):
+            return {"accepted": False, "reason": cls.REASON_NAN_OR_INF, "rms": float("nan"), "axis_lengths": axis_lengths}
+        if rms_lower_bound is not None and rms < float(rms_lower_bound):
+            return {"accepted": False, "reason": cls.REASON_RMS_TOO_LOW, "rms": rms, "axis_lengths": axis_lengths}
+        if rms_upper_bound is not None and rms > float(rms_upper_bound):
+            return {"accepted": False, "reason": cls.REASON_RMS_TOO_HIGH, "rms": rms, "axis_lengths": axis_lengths}
+
+        return {"accepted": True, "reason": cls.REASON_OK, "rms": rms, "axis_lengths": axis_lengths}
+
+    def evaluate(self, raw_inputs: Sequence[RawAccWindow]) -> dict[str, Any]:
+        accepted_mask: list[bool] = []
+        rejection_reason: list[str] = []
+        rms_values: list[float] = []
+        axis_lengths: list[tuple[int, int, int]] = []
+
+        for sample in raw_inputs:
+            record = self.inspect_sample(
+                sample,
+                expected_len=self.expected_len,
+                rms_mode=self.rms_mode,
+                rms_lower_bound=self.rms_lower_bound,
+                rms_upper_bound=self.rms_upper_bound,
+            )
+            accepted_mask.append(bool(record["accepted"]))
+            rejection_reason.append(str(record["reason"]))
+            rms_values.append(float(record["rms"]))
+            axis_lengths.append(tuple(int(v) for v in record["axis_lengths"]))
+
+        return {
+            "accepted_mask": np.asarray(accepted_mask, dtype=bool),
+            "rejected_mask": ~np.asarray(accepted_mask, dtype=bool),
+            "rejection_reason": np.asarray(rejection_reason, dtype=object),
+            "rms": np.asarray(rms_values, dtype=np.float32),
+            "axis_lengths": np.asarray(axis_lengths, dtype=np.int32),
+        }
+
+    def export_kwargs(self) -> dict[str, Any]:
+        return {
+            "expected_len": int(self.expected_len),
+            "rms_mode": self.rms_mode,
+            "rms_lower_bound": None if self.rms_lower_bound is None else float(self.rms_lower_bound),
+            "rms_upper_bound": None if self.rms_upper_bound is None else float(self.rms_upper_bound),
+            "calibration_rms_mean": float(self.calibration_rms_mean),
+            "calibration_rms_std": float(self.calibration_rms_std),
+            "calibration_rms_median": float(self.calibration_rms_median),
+            "calibration_rms_lower_quantile": float(self.calibration_rms_lower_quantile),
+            "calibration_rms_upper_quantile": float(self.calibration_rms_upper_quantile),
+            "rms_lower_q": float(self.rms_lower_q),
+            "rms_upper_q": float(self.rms_upper_q),
+            "rms_lower_scale": float(self.rms_lower_scale),
+            "rms_upper_scale": float(self.rms_upper_scale),
+        }
+
+    @classmethod
+    def from_kwargs(cls, kwargs: Mapping[str, Any]) -> "Stage0WindowGuard":
+        return cls(
+            expected_len=int(kwargs["expected_len"]),
+            rms_lower_bound=(
+                None if kwargs.get("rms_lower_bound") is None else float(kwargs["rms_lower_bound"])
+            ),
+            rms_upper_bound=(
+                None if kwargs.get("rms_upper_bound") is None else float(kwargs["rms_upper_bound"])
+            ),
+            calibration_rms_mean=float(kwargs["calibration_rms_mean"]),
+            calibration_rms_std=float(kwargs["calibration_rms_std"]),
+            calibration_rms_median=float(kwargs["calibration_rms_median"]),
+            calibration_rms_lower_quantile=float(kwargs["calibration_rms_lower_quantile"]),
+            calibration_rms_upper_quantile=float(kwargs["calibration_rms_upper_quantile"]),
+            rms_mode=str(kwargs.get("rms_mode", DEFAULT_STAGE0_RMS_MODE)),
+            rms_lower_q=float(kwargs.get("rms_lower_q", DEFAULT_STAGE0_RMS_LOWER_Q)),
+            rms_upper_q=float(kwargs.get("rms_upper_q", DEFAULT_STAGE0_RMS_UPPER_Q)),
+            rms_lower_scale=float(kwargs.get("rms_lower_scale", DEFAULT_STAGE0_RMS_LOWER_SCALE)),
+            rms_upper_scale=float(kwargs.get("rms_upper_scale", DEFAULT_STAGE0_RMS_UPPER_SCALE)),
+        )
 
 
 def _require_torch():
@@ -752,6 +1017,7 @@ def serialize_mahalanobis_gatekeeper(
     window_len: int,
     preprocessor_name: str = "rms",
     preprocessor_kwargs: Mapping[str, Any] | None = None,
+    stage0_guard: Stage0WindowGuard | None = None,
     batch_size: int | None = None,
 ) -> dict[str, Any]:
     encoder = bundle["encoder"]
@@ -784,6 +1050,7 @@ def serialize_mahalanobis_gatekeeper(
         "preprocessor_kwargs": _normalize_nested_scalars(
             _infer_preprocessor_kwargs(None, preprocessor_kwargs or bundle.get("preprocessor_kwargs"))
         ),
+        "stage0_guard_kwargs": None if stage0_guard is None else _normalize_nested_scalars(stage0_guard.export_kwargs()),
         "batch_size": int(batch_size or bundle.get("batch_size", DEFAULT_BATCH_SIZE)),
     }
 
@@ -797,6 +1064,7 @@ def save_mahalanobis_gatekeeper(
     window_len: int,
     preprocessor_name: str = "rms",
     preprocessor_kwargs: Mapping[str, Any] | None = None,
+    stage0_guard: Stage0WindowGuard | None = None,
     batch_size: int | None = None,
 ) -> Path:
     artifact = serialize_mahalanobis_gatekeeper(
@@ -806,6 +1074,7 @@ def save_mahalanobis_gatekeeper(
         window_len=window_len,
         preprocessor_name=preprocessor_name,
         preprocessor_kwargs=preprocessor_kwargs,
+        stage0_guard=stage0_guard,
         batch_size=batch_size,
     )
     return save_anomaly_detector_artifact(path, artifact)
@@ -891,6 +1160,7 @@ class MahalanobisAnomalyDetector:
         preprocessor_name: str = "rms",
         preprocessor_kwargs: Mapping[str, Any] | None = None,
         preprocessor: Preprocessor | None = None,
+        stage0_guard: Stage0WindowGuard | None = None,
         batch_size: int = DEFAULT_BATCH_SIZE,
         threshold_details: Mapping[int, Any] | None = None,
         class_prototype_details: Mapping[int, Any] | None = None,
@@ -912,6 +1182,7 @@ class MahalanobisAnomalyDetector:
             _infer_preprocessor_kwargs(preprocessor, preprocessor_kwargs)
         )
         self.preprocessor = preprocessor or _make_preprocessor(self.preprocessor_name, self.preprocessor_kwargs)
+        self.stage0_guard = stage0_guard
         self.batch_size = int(batch_size)
         self.threshold_details = _normalize_nested_scalars(threshold_details or {})
         self.class_prototype_details = _normalize_nested_scalars(class_prototype_details or {})
@@ -943,13 +1214,95 @@ class MahalanobisAnomalyDetector:
         return details["is_unknown"], details["decision_confidence"]
 
     def predict_details(self, raw_inputs: Sequence[RawAccWindow]) -> dict[str, np.ndarray]:
-        processed_inputs = self.preprocessor.preprocess(list(raw_inputs))
+        samples = list(raw_inputs)
+        feature_dim = int(getattr(self.scaler, "n_features_in_", len(getattr(self.scaler, "mean_", []))))
+        if not samples:
+            empty = np.empty((0,), dtype=np.float32)
+            return {
+                "embeddings": np.empty((0, feature_dim), dtype=np.float32),
+                "distance": empty.copy(),
+                "nearest_label": np.empty((0,), dtype=np.int64),
+                "nearest_prototype": np.empty((0,), dtype=np.int64),
+                "second_distance": empty.copy(),
+                "second_label": np.empty((0,), dtype=np.int64),
+                "distance_ratio": empty.copy(),
+                "distance_gap": empty.copy(),
+                "applied_threshold": empty.copy(),
+                "distance_exceeds_threshold": np.empty((0,), dtype=np.int64),
+                "ambiguity_exceeds_threshold": np.empty((0,), dtype=np.int64),
+                "is_unknown": np.empty((0,), dtype=np.int64),
+                "decision_confidence": empty.copy(),
+                "stage0_valid": np.empty((0,), dtype=np.int64),
+                "stage0_reason": np.empty((0,), dtype=object),
+                "stage0_rms": empty.copy(),
+                "stage0_axis_lengths": np.empty((0, 3), dtype=np.int32),
+            }
+
+        if self.stage0_guard is None:
+            processed_inputs = self.preprocessor.preprocess(samples)
+            x_np = self.raw_embedder.embed(processed_inputs)
+            details = predict_gatekeeper(self.bundle, x_np, batch_size=self.batch_size)
+            details["decision_confidence"] = gate_decision_confidence(
+                details,
+                ambiguity_ratio_threshold=self.ambiguity_ratio_threshold,
+            )
+            details["stage0_valid"] = np.ones(len(samples), dtype=np.int64)
+            details["stage0_reason"] = np.full(len(samples), Stage0WindowGuard.REASON_OK, dtype=object)
+            details["stage0_rms"] = np.full(len(samples), np.nan, dtype=np.float32)
+            details["stage0_axis_lengths"] = np.full((len(samples), 3), -1, dtype=np.int32)
+            return details
+
+        stage0 = self.stage0_guard.evaluate(samples)
+        accepted_mask = np.asarray(stage0["accepted_mask"], dtype=bool)
+        accepted_indices = np.flatnonzero(accepted_mask)
+
+        details = {
+            "embeddings": np.full((len(samples), feature_dim), np.nan, dtype=np.float32),
+            "distance": np.full(len(samples), np.nan, dtype=np.float32),
+            "nearest_label": np.full(len(samples), -1, dtype=np.int64),
+            "nearest_prototype": np.full(len(samples), -1, dtype=np.int64),
+            "second_distance": np.full(len(samples), np.nan, dtype=np.float32),
+            "second_label": np.full(len(samples), -1, dtype=np.int64),
+            "distance_ratio": np.full(len(samples), np.nan, dtype=np.float32),
+            "distance_gap": np.full(len(samples), np.nan, dtype=np.float32),
+            "applied_threshold": np.full(len(samples), np.nan, dtype=np.float32),
+            "distance_exceeds_threshold": np.zeros(len(samples), dtype=np.int64),
+            "ambiguity_exceeds_threshold": np.zeros(len(samples), dtype=np.int64),
+            "is_unknown": np.ones(len(samples), dtype=np.int64),
+            "decision_confidence": np.ones(len(samples), dtype=np.float32),
+            "stage0_valid": accepted_mask.astype(np.int64),
+            "stage0_reason": np.asarray(stage0["rejection_reason"], dtype=object),
+            "stage0_rms": np.asarray(stage0["rms"], dtype=np.float32),
+            "stage0_axis_lengths": np.asarray(stage0["axis_lengths"], dtype=np.int32),
+        }
+
+        if accepted_indices.size == 0:
+            return details
+
+        processed_inputs = self.preprocessor.preprocess([samples[idx] for idx in accepted_indices.tolist()])
         x_np = self.raw_embedder.embed(processed_inputs)
-        details = predict_gatekeeper(self.bundle, x_np, batch_size=self.batch_size)
-        details["decision_confidence"] = gate_decision_confidence(
-            details,
+        accepted_details = predict_gatekeeper(self.bundle, x_np, batch_size=self.batch_size)
+        accepted_conf = gate_decision_confidence(
+            accepted_details,
             ambiguity_ratio_threshold=self.ambiguity_ratio_threshold,
         )
+
+        for key in [
+            "embeddings",
+            "distance",
+            "nearest_label",
+            "nearest_prototype",
+            "second_distance",
+            "second_label",
+            "distance_ratio",
+            "distance_gap",
+            "applied_threshold",
+            "distance_exceeds_threshold",
+            "ambiguity_exceeds_threshold",
+            "is_unknown",
+        ]:
+            details[key][accepted_indices] = accepted_details[key]
+        details["decision_confidence"][accepted_indices] = accepted_conf
         return details
 
     def recalibrate_from_normal_data(
@@ -1049,6 +1402,7 @@ class MahalanobisAnomalyDetector:
                 window_len=self.window_len,
                 preprocessor_name=self.preprocessor_name,
                 preprocessor_kwargs=self.preprocessor_kwargs,
+                stage0_guard=self.stage0_guard,
                 batch_size=self.batch_size,
             ),
         }
@@ -1067,6 +1421,7 @@ class MahalanobisAnomalyDetector:
         preprocessor = artifact.get("preprocessor")
         preprocessor_name = str(artifact.get("preprocessor_name", "rms"))
         preprocessor_kwargs = artifact.get("preprocessor_kwargs")
+        stage0_guard_kwargs = artifact.get("stage0_guard_kwargs")
         if preprocessor is not None and not isinstance(preprocessor, Preprocessor):
             raise TypeError("Expected anomaly detector artifact 'preprocessor' to implement Preprocessor.")
 
@@ -1085,6 +1440,11 @@ class MahalanobisAnomalyDetector:
             preprocessor_name=preprocessor_name,
             preprocessor_kwargs=preprocessor_kwargs if isinstance(preprocessor_kwargs, Mapping) else None,
             preprocessor=preprocessor,
+            stage0_guard=(
+                Stage0WindowGuard.from_kwargs(stage0_guard_kwargs)
+                if isinstance(stage0_guard_kwargs, Mapping)
+                else None
+            ),
             batch_size=int(artifact.get("batch_size", DEFAULT_BATCH_SIZE)),
             threshold_details=artifact.get("threshold_details"),
             class_prototype_details=artifact.get("class_prototype_details"),
