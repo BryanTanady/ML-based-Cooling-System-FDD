@@ -2,14 +2,21 @@
   <div class="system-status">
     <h3>System Status / Active Faults</h3>
     <div class="fault-breakdown">
-      <div
-        v-for="fault in faultDefs"
-        :key="fault.key"
-        class="fault-item"
-        :class="fault.key"
-      >
-        <span class="fault-label">{{ fault.label }}</span>
-        <span class="fault-count">{{ faultCounts[fault.key] }}</span>
+      <div class="fault-item Fan_Blocked">
+        <span class="fault-label">BLOCKED_AIRFLOW</span>
+        <span class="fault-count">{{ faultCounts.Fan_Blocked }}</span>
+      </div>  
+      <div class="fault-item Fan_Blade_Issue">
+        <span class="fault-label">BLADE_ISSUE</span>
+        <span class="fault-count">{{ faultCounts.Fan_Blade_Issue }}</span>
+      </div>  
+      <div class="fault-item Electrical_Fault">
+        <span class="fault-label">POWER_ISSUE</span>
+        <span class="fault-count">{{ faultCounts.Electrical_Fault }}</span>
+      </div>  
+      <div class="fault-item Unknown">
+        <span class="fault-label">UNKNOWN</span>
+        <span class="fault-count">{{ faultCounts.Unknown }}</span>
       </div>
     </div>
   </div>
@@ -18,33 +25,26 @@
 <script setup>
 import { computed } from 'vue'
 
+// Count alerts by fault type
 const props = defineProps({
   alerts: {
     type: Array,
-    default: () => [],
-  },
+    default: () => []
+  }
 })
 
-const faultDefs = [
-  { key: 'BLOCKED_AIRFLOW', label: 'Blocked Airflow' },
-  { key: 'BLADE_ISSUE', label: 'Blade Issue' },
-  { key: 'POWER_ISSUE', label: 'Power Issue' },
-  { key: 'UNKNOWN', label: 'Unknown' },
-]
-
 const faultCounts = computed(() => {
-  const counts = {
-    BLOCKED_AIRFLOW: 0,
-    BLADE_ISSUE: 0,
-    POWER_ISSUE: 0,
-    UNKNOWN: 0,
-  }
-  props.alerts.forEach((alert) => {
-    const key = typeof alert.condition_name === 'string' ? alert.condition_name : 'UNKNOWN'
-    if (Object.prototype.hasOwnProperty.call(counts, key)) {
-      counts[key] += 1
+  const counts = { Fan_Blocked: 0, Fan_Blade_Issue: 0, Electrical_Fault: 0, Unknown: 0 }
+  props.alerts.forEach(alert => {
+    const code = alert?.fault_type_code || alert?.fault_type
+    if (code === 'BLOCKED_AIRFLOW') {
+      counts.Fan_Blocked++
+    } else if (code === 'BLADE_ISSUE') {
+      counts.Fan_Blade_Issue++
+    } else if (code === 'POWER_ISSUE') {
+      counts.Electrical_Fault++
     } else {
-      counts.UNKNOWN += 1
+      counts.Unknown++
     }
   })
   return counts

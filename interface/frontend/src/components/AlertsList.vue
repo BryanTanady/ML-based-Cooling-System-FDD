@@ -25,18 +25,21 @@
         </div>
         <div
           v-for="(alert, index) in alerts"
-          :key="index"
+          :key="`pending-${alert.id}-${index}`"
           class="alert-item"
-          :class="getFaultType(alert.condition_name)"
+          :class="getFaultClass(alert)"
         >
           <div class="alert-header">
             <span class="alert-asset">{{ alert.asset_id }}</span>
           </div>
-          <div class="alert-message">{{ alert.message }}</div>
+          <div class="alert-message">{{ alert.fault_type }}</div>
           <div class="alert-footer">
-            <span class="alert-count-badge">Total: {{ alert.count }}</span>
-            <span class="alert-confidence">Confidence: {{ formatConfidence(alert.confidence) }}</span>
-            <span class="alert-time">{{ formatTime(alert.ts) }}</span>
+            <span class="alert-time">{{ formatTime(alert.start_ts) }}</span>
+          </div>
+          <div class="alert-actions">
+            <button @click="acknowledgeAlert(index)" class="acknowledge-btn">
+              Acknowledge
+            </button>
           </div>
         </div>
       </div>
@@ -185,6 +188,14 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  rawAlerts: {
+    type: Array,
+    default: () => [],
+  },
+  acknowledgeAlert: {
+    type: Function,
+    required: true,
+  },
 })
 
 const activeTab = ref('pending')
@@ -223,22 +234,37 @@ const FAULT_COLORS = {
   UNKNOWN: '#d32f2f',
 }
 
-const getFaultType = (conditionName) => {
-  if (!conditionName || typeof conditionName !== 'string') return 'UNKNOWN'
-  return conditionName
+function normalizeFaultCode(nameOrCode) {
+  if (!nameOrCode || typeof nameOrCode !== 'string') return 'UNKNOWN'
+  const key = nameOrCode.toUpperCase().replace(/\s+/g, '_').replace(/-+/g, '_')
+  if (key.includes('BLOCKED') || key === 'BLOCKED_AIRFLOW' || key === 'FAN_BLOCKED') return 'BLOCKED_AIRFLOW'
+  if (key.includes('BLADE') || key === 'BLADE_ISSUE') return 'BLADE_ISSUE'
+  if (key.includes('POWER') || key.includes('ELECTR') || key === 'POWER_ISSUE') return 'POWER_ISSUE'
+  return key || 'UNKNOWN'
+}
+
+const getFaultClass = (alert) => {
+  const code = alert.fault_type || alert.condition_name
+  return normalizeFaultCode(code)
 }
 
 const getFaultColor = (conditionName) => {
-  const normalized = getFaultType(conditionName)
+  const normalized = normalizeFaultCode(conditionName)
   return FAULT_COLORS[normalized] || FAULT_COLORS.UNKNOWN
 }
 
 const formatConditionLabel = (conditionName) => {
-  const normalized = getFaultType(conditionName)
+  const normalized = normalizeFaultCode(conditionName)
   return normalized
     .replace(/_/g, ' ')
     .toLowerCase()
     .replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+const formatTime = (ts) => {
+  if (!ts) return 'Unknown time'
+  const timestamp = typeof ts === 'string' ? new Date(ts).getTime() : (ts < 10000000000 ? ts * 1000 : ts)
+  return new Date(timestamp).toLocaleString()
 }
 
 const normalizeTimestampMs = (ts) => {
@@ -252,7 +278,7 @@ const parseConfidence = (value) => {
 }
 
 const chartPoints = computed(() => {
-  return props.alerts
+  return props.rawAlerts
     .map((alert) => {
       const tsMs = normalizeTimestampMs(Number(alert.ts))
       const confidence = parseConfidence(Number(alert.confidence))
@@ -260,7 +286,7 @@ const chartPoints = computed(() => {
       return {
         tsMs,
         confidence,
-        conditionName: getFaultType(alert.condition_name),
+        conditionName: normalizeFaultCode(alert.condition_name || alert.message),
       }
     })
     .filter((point) => point !== null)
@@ -375,19 +401,6 @@ const xTicks = computed(() => {
     label: formatAxisTime(value),
   }))
 })
-
-const formatTime = (ts) => {
-  if (!ts) return 'Unknown time'
-  const timestamp = ts < 10000000000 ? ts * 1000 : ts
-  return new Date(timestamp).toLocaleString()
-}
-
-const formatConfidence = (confidence) => {
-  if (confidence === null || confidence === undefined || !Number.isFinite(confidence)) {
-    return 'N/A'
-  }
-  return `${(confidence * 100).toFixed(1)}%`
-}
 </script>
 
 <style scoped>
@@ -517,18 +530,34 @@ const formatConfidence = (confidence) => {
   border-top: 1px solid #eee;
 }
 
-.alert-count-badge {
-  background: #f0f0f0;
-  padding: 2px 8px;
-  border-radius: 12px;
-}
-
 .alert-time {
   color: #999;
 }
 
-.alert-confidence {
-  color: #666;
+.alert-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.acknowledge-btn {
+  background-color: #0087DC;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  transition: background-color 0.2s;
+}
+
+.acknowledge-btn:hover {
+  background-color: #006ba8;
+}
+
+.acknowledge-btn:active {
+  background-color: #005a8f;
 }
 
 .graph-panel {
