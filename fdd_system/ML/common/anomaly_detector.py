@@ -42,6 +42,8 @@ DEFAULT_RUNTIME_GATE_DISTANCE_Q = 0.99
 DEFAULT_RUNTIME_GATE_DISTANCE_MARGIN = 1.10
 DEFAULT_RUNTIME_GATE_AMBIGUITY_Q = 0.99
 DEFAULT_RUNTIME_GATE_AMBIGUITY_SLACK = 0.05
+DEFAULT_RUNTIME_NORMALITY_MAX_THRESHOLD_SCALE = 1.50
+DEFAULT_RUNTIME_NORMALITY_CAP_MAX_UNKNOWN_BEFORE = 0.10
 DEFAULT_STAGE0_RMS_MODE = "raw"
 DEFAULT_STAGE0_RMS_LOWER_Q = 0.05
 DEFAULT_STAGE0_RMS_UPPER_Q = 0.95
@@ -869,10 +871,19 @@ def predict_gatekeeper(
         dtype=np.float32,
     )
     distance_exceeds_threshold = score_details["nearest_distance"] > applied_threshold
-    ambiguity_exceeds_threshold = (
-        score_details["distance_ratio"] > float(bundle["ambiguity_ratio_threshold"])
-    )
-    is_unknown = (distance_exceeds_threshold & ambiguity_exceeds_threshold).astype(np.int64)
+    use_ambiguity = bool(bundle.get("use_ambiguity", True))
+    if "use_ambiguity" not in bundle:
+        owner_labels = [int(entry["label"]) for entry in bundle.get("prototype_table", [])]
+        use_ambiguity = len(set(owner_labels)) > 1
+
+    if use_ambiguity:
+        ambiguity_exceeds_threshold = (
+            score_details["distance_ratio"] > float(bundle["ambiguity_ratio_threshold"])
+        )
+        is_unknown = (distance_exceeds_threshold & ambiguity_exceeds_threshold).astype(np.int64)
+    else:
+        ambiguity_exceeds_threshold = np.zeros_like(distance_exceeds_threshold, dtype=bool)
+        is_unknown = distance_exceeds_threshold.astype(np.int64)
 
     return {
         "embeddings": embeddings_scaled.astype(np.float32),
@@ -886,6 +897,7 @@ def predict_gatekeeper(
         "applied_threshold": applied_threshold,
         "distance_exceeds_threshold": distance_exceeds_threshold.astype(np.int64),
         "ambiguity_exceeds_threshold": ambiguity_exceeds_threshold.astype(np.int64),
+        "uses_ambiguity": np.full(len(nearest_label), int(use_ambiguity), dtype=np.int64),
         "is_unknown": is_unknown,
     }
 
@@ -904,9 +916,20 @@ def gate_decision_confidence(
         1e-6,
     )
     is_unknown = np.asarray(details["is_unknown"], dtype=np.int64).astype(bool)
+    use_ambiguity = np.asarray(
+        details.get("uses_ambiguity", np.ones(is_unknown.shape, dtype=np.int64)),
+        dtype=np.int64,
+    ).astype(bool).reshape(-1)
+    if use_ambiguity.size != is_unknown.size:
+        fallback_use_ambiguity = bool(use_ambiguity[0]) if use_ambiguity.size > 0 else True
+        use_ambiguity = np.full(is_unknown.shape, fallback_use_ambiguity, dtype=bool)
 
-    unknown_margin = np.minimum(distance_scale - 1.0, ambiguity_scale - 1.0)
-    known_margin = np.minimum(1.0 - distance_scale, 1.0 - ambiguity_scale)
+    ambiguity_unknown_margin = np.minimum(distance_scale - 1.0, ambiguity_scale - 1.0)
+    ambiguity_known_margin = np.minimum(1.0 - distance_scale, 1.0 - ambiguity_scale)
+    distance_only_unknown_margin = distance_scale - 1.0
+    distance_only_known_margin = 1.0 - distance_scale
+    unknown_margin = np.where(use_ambiguity, ambiguity_unknown_margin, distance_only_unknown_margin)
+    known_margin = np.where(use_ambiguity, ambiguity_known_margin, distance_only_known_margin)
     decision_margin = np.where(is_unknown, unknown_margin, known_margin)
 
     # Clamp logits before exp() so highly separated samples saturate cleanly
@@ -1186,6 +1209,8 @@ class MahalanobisAnomalyDetector:
         self.batch_size = int(batch_size)
         self.threshold_details = _normalize_nested_scalars(threshold_details or {})
         self.class_prototype_details = _normalize_nested_scalars(class_prototype_details or {})
+        owner_labels = [int(entry["label"]) for entry in self.prototype_table]
+        self.use_ambiguity = len(set(owner_labels)) > 1
         self.raw_embedder = Raw1DCNNEmbedder(
             target_len=self.window_len,
             mean=self.mean,
@@ -1198,6 +1223,7 @@ class MahalanobisAnomalyDetector:
             "per_class_thresholds": self.per_class_thresholds,
             "fallback_threshold": self.fallback_threshold,
             "ambiguity_ratio_threshold": self.ambiguity_ratio_threshold,
+            "use_ambiguity": self.use_ambiguity,
             "batch_size": self.batch_size,
             "preprocessor_kwargs": self.preprocessor_kwargs,
         }
@@ -1230,6 +1256,7 @@ class MahalanobisAnomalyDetector:
                 "applied_threshold": empty.copy(),
                 "distance_exceeds_threshold": np.empty((0,), dtype=np.int64),
                 "ambiguity_exceeds_threshold": np.empty((0,), dtype=np.int64),
+                "uses_ambiguity": np.empty((0,), dtype=np.int64),
                 "is_unknown": np.empty((0,), dtype=np.int64),
                 "decision_confidence": empty.copy(),
                 "stage0_valid": np.empty((0,), dtype=np.int64),
@@ -1268,6 +1295,7 @@ class MahalanobisAnomalyDetector:
             "applied_threshold": np.full(len(samples), np.nan, dtype=np.float32),
             "distance_exceeds_threshold": np.zeros(len(samples), dtype=np.int64),
             "ambiguity_exceeds_threshold": np.zeros(len(samples), dtype=np.int64),
+            "uses_ambiguity": np.full(len(samples), int(self.use_ambiguity), dtype=np.int64),
             "is_unknown": np.ones(len(samples), dtype=np.int64),
             "decision_confidence": np.ones(len(samples), dtype=np.float32),
             "stage0_valid": accepted_mask.astype(np.int64),
@@ -1299,6 +1327,7 @@ class MahalanobisAnomalyDetector:
             "applied_threshold",
             "distance_exceeds_threshold",
             "ambiguity_exceeds_threshold",
+            "uses_ambiguity",
             "is_unknown",
         ]:
             details[key][accepted_indices] = accepted_details[key]
@@ -1331,6 +1360,8 @@ class MahalanobisAnomalyDetector:
         distance_ratio = np.asarray(details_before["distance_ratio"], dtype=np.float32)
         nearest_label = np.asarray(details_before["nearest_label"], dtype=np.int64)
         is_unknown_before = np.asarray(details_before["is_unknown"], dtype=np.int64)
+        unknown_before_count = int(np.sum(is_unknown_before))
+        unknown_before_rate = float(unknown_before_count / max(1, nearest_distance.size))
 
         finite_distance = nearest_distance[np.isfinite(nearest_distance)]
         if finite_distance.size == 0:
@@ -1348,11 +1379,33 @@ class MahalanobisAnomalyDetector:
         old_fallback_threshold = float(self.fallback_threshold)
         old_ambiguity_ratio_threshold = float(self.ambiguity_ratio_threshold)
 
+        detector_labels = sorted({int(entry["label"]) for entry in self.prototype_table})
+        is_normality_detector = (
+            len(detector_labels) == 1 and detector_labels[0] == int(OperatingCondition.NORMAL.value)
+        )
+
+        effective_distance_floor = float(observed_distance_floor)
+        normality_threshold_cap_applied = False
+        normality_threshold_cap = float("nan")
+        normality_cap_allowed = unknown_before_rate <= float(DEFAULT_RUNTIME_NORMALITY_CAP_MAX_UNKNOWN_BEFORE)
+        if (
+            is_normality_detector
+            and normality_cap_allowed
+            and np.isfinite(old_fallback_threshold)
+            and old_fallback_threshold > 0.0
+        ):
+            normality_threshold_cap = float(
+                old_fallback_threshold * float(DEFAULT_RUNTIME_NORMALITY_MAX_THRESHOLD_SCALE)
+            )
+            if effective_distance_floor > normality_threshold_cap:
+                effective_distance_floor = float(normality_threshold_cap)
+                normality_threshold_cap_applied = True
+
         self.per_class_thresholds = {
-            int(label): float(max(threshold, observed_distance_floor))
+            int(label): float(max(threshold, effective_distance_floor))
             for label, threshold in self.per_class_thresholds.items()
         }
-        self.fallback_threshold = float(max(self.fallback_threshold, observed_distance_floor))
+        self.fallback_threshold = float(max(self.fallback_threshold, effective_distance_floor))
         self.ambiguity_ratio_threshold = float(
             min(0.999, max(self.ambiguity_ratio_threshold, observed_ratio_q + ambiguity_slack))
         )
@@ -1376,6 +1429,12 @@ class MahalanobisAnomalyDetector:
             "distance_quantile": distance_quantile,
             "distance_margin": distance_margin,
             "distance_floor": float(observed_distance_floor),
+            "effective_distance_floor": float(effective_distance_floor),
+            "detector_labels": detector_labels,
+            "is_normality_detector": bool(is_normality_detector),
+            "normality_cap_allowed": bool(normality_cap_allowed),
+            "normality_threshold_cap_applied": bool(normality_threshold_cap_applied),
+            "normality_threshold_cap": float(normality_threshold_cap),
             "ambiguity_quantile": ambiguity_quantile,
             "ambiguity_ratio_quantile": float(observed_ratio_q),
             "ambiguity_slack": float(ambiguity_slack),
@@ -1385,7 +1444,8 @@ class MahalanobisAnomalyDetector:
             "new_ambiguity_ratio_threshold": float(self.ambiguity_ratio_threshold),
             "old_per_class_thresholds": old_per_class_thresholds,
             "new_per_class_thresholds": dict(self.per_class_thresholds),
-            "unknown_before": int(np.sum(is_unknown_before)),
+            "unknown_before": unknown_before_count,
+            "unknown_before_rate": float(unknown_before_rate),
             "unknown_after": int(np.sum(is_unknown_after)),
         }
 

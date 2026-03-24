@@ -1,4 +1,6 @@
 from abc import abstractmethod
+import logging
+import os
 from typing import Protocol, TYPE_CHECKING
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
@@ -130,3 +132,89 @@ class OnnxInferrer(Inferrer):
             conf = np.maximum(prob, 1 - prob)
 
         return preds, np.asarray(conf, dtype=float)
+
+
+class TorchInferrer(Inferrer):
+    """Inferrer wrapper for torch.nn.Module classifiers."""
+
+    def __init__(self, model):
+        import importlib
+
+        torch_spec = importlib.util.find_spec("torch")
+        if torch_spec is None:
+            raise ImportError("TorchInferrer requires torch to be installed.")
+
+        torch = importlib.import_module("torch")
+        if not isinstance(model, torch.nn.Module):
+            raise TypeError("TorchInferrer expects a torch.nn.Module model.")
+
+        super().__init__(model)
+        self._torch = torch
+        self._log = logging.getLogger(__name__)
+        self.model = model
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._device_type = self.device.type
+        jit_flag = os.getenv("FDD_TORCH_JIT_OPTIMIZE", "1").strip().lower()
+        self._jit_optimize_enabled = jit_flag not in {"0", "false", "no", "off"}
+        self._jit_optimized = False
+        self._jit_opt_attempted = False
+        self.model.to(self.device)
+        self.model.eval()
+
+    def _try_jit_optimize(self, example_batch) -> None:
+        if self._jit_opt_attempted or not self._jit_optimize_enabled or self._device_type != "cpu":
+            return
+
+        self._jit_opt_attempted = True
+        try:
+            if isinstance(self.model, self._torch.jit.ScriptModule):
+                optimized = self._torch.jit.optimize_for_inference(self.model)
+            else:
+                example = example_batch[:1].detach().cpu().contiguous()
+                traced = self._torch.jit.trace(self.model.cpu().eval(), example, strict=False)
+                optimized = self._torch.jit.optimize_for_inference(traced)
+            optimized.eval()
+            self.model = optimized
+            self._jit_optimized = True
+            self._log.info("TorchInferrer enabled JIT optimize_for_inference on CPU.")
+        except Exception as exc:  # pragma: no cover - depends on model ops/runtime support
+            self._log.warning("TorchInferrer JIT optimization skipped: %s", exc)
+
+    def _forward_logits(self, embeddings: np.ndarray):
+        arr = np.asarray(embeddings, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = np.expand_dims(arr, axis=0)
+
+        with self._torch.inference_mode():
+            xb = self._torch.from_numpy(arr)
+            if self._device_type == "cpu":
+                self._try_jit_optimize(xb)
+            else:
+                xb = xb.to(self.device, non_blocking=True)
+            logits = self.model(xb)
+            if isinstance(logits, (tuple, list)):
+                logits = logits[0]
+            return logits
+
+    def infer(self, embeddings: np.ndarray) -> np.ndarray:
+        logits = self._forward_logits(embeddings)
+        if logits.ndim == 2 and logits.shape[1] > 1:
+            preds = self._torch.argmax(logits, dim=1)
+        else:
+            preds = (logits.reshape(-1) > 0).to(dtype=self._torch.int64)
+        return np.asarray(preds.detach().cpu().numpy(), dtype=np.int64)
+
+    def infer_with_confidence(self, embeddings: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        logits = self._forward_logits(embeddings)
+        if logits.ndim == 2 and logits.shape[1] > 1:
+            probs = self._torch.softmax(logits, dim=1)
+            conf, preds = self._torch.max(probs, dim=1)
+        else:
+            prob = self._torch.sigmoid(logits.reshape(-1))
+            preds = (prob > 0.5).to(dtype=self._torch.int64)
+            conf = self._torch.maximum(prob, 1.0 - prob)
+
+        return (
+            np.asarray(preds.detach().cpu().numpy(), dtype=np.int64),
+            np.asarray(conf.detach().cpu().numpy(), dtype=np.float32),
+        )

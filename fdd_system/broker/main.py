@@ -6,13 +6,16 @@ Example usage:
       --baudrate 115200 \
       --input-format bin \
       --fs-hz 800 \
-      --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.onnx \
-      --model-format onnx \
+      --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.pt \
+      --model-format torch \
       --embedder auto \
-      --preprocessor auto \
+      --preprocessor rms \
+      --normality-detector-path experiment/weights/end_to_end_normality_detector.pt \
       --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt \
       --calibration-seconds 20 \
       --calibration-discard-seconds 2 \
+      --adabn-runtime-calibration \
+      --adabn-ema-momentum 0.1 \
       --gate-runtime-calibration
 """
 
@@ -32,20 +35,24 @@ import serial
 from tqdm import tqdm
 
 from data_collection.binary_protocol import ADXLBinaryParser
-from fdd_system.ML.common.config import SensorConfig
+from fdd_system.ML.common.anomaly_detector import Stage0WindowGuard
+from fdd_system.ML.common.config import OperatingCondition, SensorConfig
+from fdd_system.ML.inference.known_unknown_pipeline import KnownUnknownClassificationPipeline
+from fdd_system.ML.inference.normality_fault_pipeline import NormalityFaultClassificationPipeline
 from fdd_system.broker.io_helpers import AlertSender, SerialReader, WindowBuilder, parse_sample
 from fdd_system.broker.prediction_utils import (
-    apply_runtime_calibration,
+    apply_runtime_adabn,
     apply_runtime_gate_calibration,
     build_pipeline,
-    collect_calibration_targets,
     format_label_counts,
     log_prediction_counts,
     record_predictions,
+    supports_runtime_adabn,
+    supports_runtime_gate_calibration,
 )
 
 EXAMPLE_USAGE = """Examples:
-  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.onnx --model-format onnx --embedder auto --preprocessor auto --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt --calibration-seconds 20 --calibration-discard-seconds 2 --gate-runtime-calibration
+  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.pt --model-format torch --embedder auto --preprocessor rms --normality-detector-path experiment/weights/end_to_end_normality_detector.pt --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt --calibration-seconds 20 --calibration-discard-seconds 2 --adabn-runtime-calibration --adabn-ema-momentum 0.1 --gate-runtime-calibration
 """
 
 
@@ -131,6 +138,38 @@ class BrokerDataRecorder:
         self._fh.close()
 
 
+def _resolve_adabn_ema_momentum(model_path: str, cli_value: float | None, log: logging.Logger) -> tuple[float, str]:
+    """Resolve AdaBN EMA momentum from CLI, then model metadata, then default."""
+    if cli_value is not None:
+        return float(cli_value), "cli"
+
+    meta_candidates = [
+        Path(model_path).with_suffix(".meta.json"),
+        Path(model_path).with_name(f"{Path(model_path).stem}.meta.json"),
+    ]
+    for meta_path in meta_candidates:
+        if not meta_path.exists():
+            continue
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            log.warning("Failed to parse model metadata at %s: %s", meta_path, exc)
+            continue
+        value = (
+            payload.get("runtime_calibration", {})
+            .get("adabn", {})
+            .get("ema_momentum")
+        )
+        if value is None:
+            continue
+        try:
+            return float(value), f"metadata:{meta_path.name}"
+        except (TypeError, ValueError):
+            log.warning("Invalid runtime_calibration.adabn.ema_momentum in %s: %r", meta_path, value)
+
+    return 0.1, "default"
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build broker CLI parser."""
     parser = argparse.ArgumentParser(
@@ -158,19 +197,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=float(SensorConfig.SAMPLING_RATE),
         help="Sampling rate (Hz) used to synthesize timestamps for 9-byte frames.",
     )
-    parser.add_argument("--model-path", type=str, required=True, help="Path to trained model (.joblib/.pkl/.onnx)")
+    parser.add_argument("--model-path", type=str, required=True, help="Path to trained model (.joblib/.pkl/.onnx/.pt)")
+    parser.add_argument(
+        "--normality-detector-path",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a serialized normality detector artifact. When provided, broker uses it as "
+            "Stage 2 normal gate before downstream unknown/fault inference."
+        ),
+    )
     parser.add_argument(
         "--anomaly-detector-path",
         type=str,
         default=None,
         help=(
-            "Optional path to a serialized anomaly detector artifact. When provided, broker emits "
-            "UNKNOWN for anomalous windows before running the classifier."
+            "Optional path to a serialized anomaly detector artifact. When provided with --normality-detector-path, "
+            "this acts as the Stage 3 fault unknown detector."
         ),
     )
     parser.add_argument(
         "--model-format",
-        choices=["auto", "sklearn", "onnx"],
+        choices=["auto", "sklearn", "onnx", "torch"],
         default="auto",
         help="Model serialization format. Default auto-detects from --model-path suffix.",
     )
@@ -190,8 +238,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "median",
             "standard",
             "rms",
-            "calibration",
-            "calibration_z",
         ],
         default="auto",
         help="Input preprocessor. Default is basic unless overridden by ONNX metadata.",
@@ -200,7 +246,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--calibration-seconds",
         type=float,
         default=20.0,
-        help="When using calibration-aware preprocessing, collect this many seconds of startup data before inference.",
+        help="Collect this many seconds of startup data before inference for runtime adaptation (gate/AdaBN).",
     )
     parser.add_argument(
         "--calibration-discard-seconds",
@@ -217,7 +263,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help=(
             "Adapt the KNOWN/UNKNOWN gate using the target-normal startup calibration windows "
-            "after fitting the runtime preprocessor."
+            "after preprocessing with the runtime pipeline."
         ),
     )
     parser.add_argument(
@@ -243,6 +289,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.05,
         help="Additive slack applied to the runtime ambiguity-ratio threshold.",
+    )
+    parser.add_argument(
+        "--adabn-runtime-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Recalibrate torch classifier BatchNorm running statistics (AdaBN) using startup calibration windows "
+            "after preprocessing/embedder normalization."
+        ),
+    )
+    parser.add_argument(
+        "--adabn-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Batch size used for runtime AdaBN recalibration. "
+            "Set <=0 to run adaptation in one batch (recommended for exact global stats)."
+        ),
+    )
+    parser.add_argument(
+        "--adabn-ema-momentum",
+        type=float,
+        default=None,
+        help=(
+            "EMA momentum for runtime AdaBN BatchNorm running-stat updates. "
+            "Must be in (0, 1]. Higher values adapt faster to startup calibration data. "
+            "If omitted, broker uses model metadata runtime_calibration.adabn.ema_momentum when present; "
+            "otherwise defaults to 0.1."
+        ),
     )
     parser.add_argument("--loop-delay", type=float, default=0.05, help="Sleep between loop iterations (seconds)")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level")
@@ -314,9 +389,47 @@ def run_broker(args: argparse.Namespace) -> int:
         embedder=args.embedder,
         preprocessor=args.preprocessor,
         anomaly_detector_path=args.anomaly_detector_path,
+        normality_detector_path=args.normality_detector_path,
     )
-    calibration_targets = collect_calibration_targets(pipeline)
-    calibration_enabled = bool(calibration_targets)
+
+    def resolve_stage0_guard(root_pipeline) -> tuple[Stage0WindowGuard | None, str]:
+        visited_ids: set[int] = set()
+        current = root_pipeline
+        while current is not None and id(current) not in visited_ids:
+            visited_ids.add(id(current))
+
+            normality_detector = getattr(current, "normality_detector", None)
+            normality_guard = getattr(normality_detector, "stage0_guard", None)
+            if isinstance(normality_guard, Stage0WindowGuard):
+                return normality_guard, "normality_detector"
+
+            anomaly_detector = getattr(current, "anomaly_detector", None)
+            anomaly_guard = getattr(anomaly_detector, "stage0_guard", None)
+            if isinstance(anomaly_guard, Stage0WindowGuard):
+                return anomaly_guard, "anomaly_detector"
+
+            current = getattr(current, "classifier_pipeline", None)
+
+        return None, "disabled"
+
+    stage0_guard, stage0_guard_source = resolve_stage0_guard(pipeline)
+    if isinstance(pipeline, NormalityFaultClassificationPipeline):
+        if isinstance(getattr(pipeline, "classifier_pipeline", None), KnownUnknownClassificationPipeline):
+            pipeline_mode = "stage1+stage2+stage3+stage4"
+        else:
+            pipeline_mode = "stage1+stage2+stage4"
+    elif isinstance(pipeline, KnownUnknownClassificationPipeline):
+        pipeline_mode = "stage1+stage3+stage4"
+    else:
+        pipeline_mode = "stage1+stage4"
+
+    effective_normality_detector = args.normality_detector_path
+    if effective_normality_detector is None and isinstance(pipeline, NormalityFaultClassificationPipeline):
+        effective_normality_detector = "auto-detected"
+
+    gate_calibration_enabled = bool(args.gate_runtime_calibration) and supports_runtime_gate_calibration(pipeline)
+    adabn_calibration_enabled = bool(args.adabn_runtime_calibration) and supports_runtime_adabn(pipeline)
+    calibration_enabled = gate_calibration_enabled or adabn_calibration_enabled
     calibration_seconds = max(0.0, float(args.calibration_seconds))
     calibration_discard_seconds = max(0.0, float(args.calibration_discard_seconds)) if calibration_enabled else 0.0
     calibration_target_samples = int(round(calibration_seconds * wb_fs)) if calibration_enabled else 0
@@ -336,23 +449,42 @@ def run_broker(args: argparse.Namespace) -> int:
         if calibration_enabled and not calibration_complete
         else None
     )
+    adabn_ema_momentum, adabn_momentum_source = _resolve_adabn_ema_momentum(
+        args.model_path,
+        args.adabn_ema_momentum,
+        log,
+    )
+    if not (0.0 < adabn_ema_momentum <= 1.0):
+        raise ValueError(f"--adabn-ema-momentum must be in (0, 1], got {adabn_ema_momentum}.")
     prediction_counts: Counter[int] = Counter()
     end_time = time.time() + args.run_seconds if args.run_seconds else None
 
     log.info(
-        "Broker started. Reading from %s @ %s baud (format=%s, fs_hz=%.3f, alert_api=%s, asset_id=%s, anomaly_detector=%s, calibration=%s)",
+        (
+            "Broker started. Reading from %s @ %s baud (format=%s, fs_hz=%.3f, alert_api=%s, asset_id=%s, "
+            "pipeline=%s, "
+            "normality_detector=%s, anomaly_detector=%s, stage0_validator=%s, calibration=%s, gate_calibration=%s, "
+            "adabn=%s, adabn_ema_momentum=%.4f (%s))"
+        ),
         args.port,
         args.baudrate,
         args.input_format,
         float(args.fs_hz),
         args.alert_api_url,
         args.asset_id,
+        pipeline_mode,
+        effective_normality_detector or "disabled",
         args.anomaly_detector_path or "disabled",
+        stage0_guard_source,
         (
             f"discard={calibration_discard_seconds:.1f}s + calibrate={calibration_seconds:.1f}s"
             if calibration_enabled
             else "disabled"
         ),
+        "enabled" if gate_calibration_enabled else "disabled",
+        "enabled" if adabn_calibration_enabled else "disabled",
+        adabn_ema_momentum,
+        adabn_momentum_source,
     )
     if calibration_enabled and not calibration_complete:
         if calibration_discard_seconds > 0:
@@ -372,17 +504,44 @@ def run_broker(args: argparse.Namespace) -> int:
         if calibration_samples_seen < calibration_total_samples:
             return
         if not calibration_windows:
-            raise RuntimeError("Calibration did not yield any windows; cannot fit runtime preprocessor.")
+            raise RuntimeError("Calibration did not yield any windows; cannot run runtime adaptation.")
 
-        apply_runtime_calibration(pipeline, calibration_windows)
+        effective_calibration_windows = list(calibration_windows)
+        if stage0_guard is not None:
+            calibration_stage0 = stage0_guard.evaluate(effective_calibration_windows)
+            accepted_mask = np.asarray(calibration_stage0["accepted_mask"], dtype=bool).reshape(-1)
+            if accepted_mask.size != len(effective_calibration_windows):
+                raise RuntimeError(
+                    "Stage0 calibration mask length mismatch: "
+                    f"mask={accepted_mask.size}, windows={len(effective_calibration_windows)}"
+                )
+            effective_calibration_windows = [
+                window for window, accepted in zip(effective_calibration_windows, accepted_mask.tolist()) if accepted
+            ]
+            log.info(
+                "Calibration Stage0 filtering: accepted=%d / total=%d (rejected=%d)",
+                len(effective_calibration_windows),
+                len(calibration_windows),
+                len(calibration_windows) - len(effective_calibration_windows),
+            )
+            if not effective_calibration_windows:
+                raise RuntimeError("All calibration windows were rejected by Stage 0; cannot run runtime adaptation.")
+
         gate_summary = apply_runtime_gate_calibration(
             pipeline,
-            calibration_windows,
-            enabled=bool(args.gate_runtime_calibration),
+            effective_calibration_windows,
+            enabled=gate_calibration_enabled,
             distance_quantile=float(args.gate_distance_quantile),
             distance_margin=float(args.gate_distance_margin),
             ambiguity_quantile=float(args.gate_ambiguity_quantile),
             ambiguity_slack=float(args.gate_ambiguity_slack),
+        )
+        adabn_summary = apply_runtime_adabn(
+            pipeline,
+            effective_calibration_windows,
+            enabled=adabn_calibration_enabled,
+            batch_size=int(args.adabn_batch_size) if int(args.adabn_batch_size) > 0 else None,
+            ema_momentum=adabn_ema_momentum,
         )
         calibration_complete = True
         window_builder = WindowBuilder(SensorConfig.WINDOW_SIZE, sampling_rate_hz=wb_fs)
@@ -395,18 +554,39 @@ def run_broker(args: argparse.Namespace) -> int:
             log.info(
                 (
                     "Runtime gate calibration updated thresholds: windows=%d, nearest_labels=%s, "
-                    "distance_floor=%.4f, fallback=%.4f->%.4f, ambiguity=%.4f->%.4f, "
+                    "distance_floor=%.4f (effective=%.4f), fallback=%.4f->%.4f, ambiguity=%.4f->%.4f, "
                     "unknown_before=%d, unknown_after=%d"
                 ),
                 gate_summary["num_windows"],
                 format_label_counts(gate_summary["nearest_label_counts"]),
                 gate_summary["distance_floor"],
+                gate_summary.get("effective_distance_floor", gate_summary["distance_floor"]),
                 gate_summary["old_fallback_threshold"],
                 gate_summary["new_fallback_threshold"],
                 gate_summary["old_ambiguity_ratio_threshold"],
                 gate_summary["new_ambiguity_ratio_threshold"],
                 gate_summary["unknown_before"],
                 gate_summary["unknown_after"],
+            )
+            if gate_summary.get("normality_threshold_cap_applied", False):
+                log.info(
+                    "Runtime normality-gate calibration cap applied: cap=%.4f, detector_labels=%s",
+                    gate_summary.get("normality_threshold_cap", float("nan")),
+                    gate_summary.get("detector_labels", []),
+                )
+        if adabn_summary is not None:
+            log.info(
+                (
+                    "Runtime AdaBN recalibration complete: windows=%d, preprocessed_windows=%d, feature_shape=%s, "
+                    "bn_layers=%d, batch_size=%d, batches=%d, ema_momentum=%.4f"
+                ),
+                adabn_summary["adaptation_windows"],
+                adabn_summary.get("preprocessed_windows", adabn_summary["adaptation_windows"]),
+                adabn_summary.get("feature_shape"),
+                adabn_summary["bn_layers"],
+                adabn_summary["adaptation_batch_size"],
+                adabn_summary["adaptation_batches"],
+                adabn_summary.get("ema_momentum", adabn_ema_momentum),
             )
         log.info("Calibration complete. Broker ready for inference.")
 
@@ -441,6 +621,36 @@ def run_broker(args: argparse.Namespace) -> int:
 
         window = window_builder.add(ax, ay, az)
         if window:
+            if stage0_guard is not None:
+                stage0_details = stage0_guard.evaluate([window])
+                accepted_mask = np.asarray(stage0_details["accepted_mask"], dtype=bool)
+                if accepted_mask.size > 0 and not bool(accepted_mask[0]):
+                    preds = np.asarray([OperatingCondition.UNKNOWN.value], dtype=np.int64)
+                    confs = np.asarray([1.0], dtype=np.float32)
+                    rejection_stage = np.asarray(["STAGE0"], dtype=object)
+                    rejection_reason = np.asarray(
+                        [str(np.asarray(stage0_details["rejection_reason"], dtype=object)[0])],
+                        dtype=object,
+                    )
+                    if recorder is not None:
+                        recorder.record_prediction(
+                            input_format=args.input_format,
+                            preds=preds,
+                            confs=confs,
+                            rejection_stage=rejection_stage,
+                            rejection_reason=rejection_reason,
+                        )
+                    record_predictions(
+                        preds,
+                        confs,
+                        prediction_counts,
+                        alert_sender,
+                        log,
+                        rejection_stage=rejection_stage,
+                        rejection_reason=rejection_reason,
+                    )
+                    return
+
             predict_details = getattr(pipeline, "predict_details", None)
             if callable(predict_details):
                 details = predict_details([window])

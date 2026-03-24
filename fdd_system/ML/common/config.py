@@ -82,5 +82,6 @@ class OperatingCondition(Enum):
     """Operating condtiions recognized by the system."""
     NORMAL = 0
     BLOCKED_AIRFLOW = 1
-    BLADE_ISSUE = 2
-    UNKNOWN = 3
+    INTERFERENCE = 2
+    IMBALANCE = 3
+    UNKNOWN = 4
