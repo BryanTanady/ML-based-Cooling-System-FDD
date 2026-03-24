@@ -19,27 +19,116 @@ Example usage:
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import logging
 import time
 from collections import Counter, deque
+from pathlib import Path
 from typing import Deque
 
+import numpy as np
 import serial
 from tqdm import tqdm
 
 from data_collection.binary_protocol import ADXLBinaryParser
-from fdd_system.ML.common.config import OperatingCondition, SensorConfig
-from fdd_system.ML.common.preprocessor import CalibrationZNormalizer
-from fdd_system.broker.SerialReader import SerialReader
-from fdd_system.broker.alerts import AlertSender
-from fdd_system.broker.parsing import parse_sample
-from fdd_system.broker.pipeline_factory import build_pipeline
-from fdd_system.broker.predictions import record_predictions
-from fdd_system.broker.windowing import WindowBuilder
+from fdd_system.ML.common.config import SensorConfig
+from fdd_system.broker.io_helpers import AlertSender, SerialReader, WindowBuilder, parse_sample
+from fdd_system.broker.prediction_utils import (
+    apply_runtime_calibration,
+    apply_runtime_gate_calibration,
+    build_pipeline,
+    collect_calibration_targets,
+    format_label_counts,
+    log_prediction_counts,
+    record_predictions,
+)
 
 EXAMPLE_USAGE = """Examples:
   python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.onnx --model-format onnx --embedder auto --preprocessor auto --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt --calibration-seconds 20 --calibration-discard-seconds 2 --gate-runtime-calibration
 """
+
+
+class BrokerDataRecorder:
+    """Append broker samples and predictions to a CSV file."""
+
+    def __init__(self, path: str):
+        out_path = Path(path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = (not out_path.exists()) or out_path.stat().st_size == 0
+        self._fh = out_path.open("a", encoding="utf-8", newline="")
+        self._writer = csv.writer(self._fh)
+        if write_header:
+            self._writer.writerow(
+                [
+                    "row_type",
+                    "ts",
+                    "input_format",
+                    "ax",
+                    "ay",
+                    "az",
+                    "predictions",
+                    "confidences",
+                    "rejection_stage",
+                    "rejection_reason",
+                ]
+            )
+            self._fh.flush()
+
+    def record_sample(self, *, input_format: str, ax: float, ay: float, az: float) -> None:
+        self._writer.writerow(
+            [
+                "sample",
+                f"{time.time():.6f}",
+                input_format,
+                f"{ax:.9f}",
+                f"{ay:.9f}",
+                f"{az:.9f}",
+                "",
+                "",
+                "",
+                "",
+            ]
+        )
+        self._fh.flush()
+
+    def record_prediction(
+        self,
+        *,
+        input_format: str,
+        preds,
+        confs,
+        rejection_stage=None,
+        rejection_reason=None,
+    ) -> None:
+        preds_arr = np.asarray(preds).ravel()
+        conf_arr = np.asarray(confs, dtype=float).ravel()
+        stage_arr = np.asarray(rejection_stage, dtype=object).ravel() if rejection_stage is not None else np.array([])
+        reason_arr = np.asarray(rejection_reason, dtype=object).ravel() if rejection_reason is not None else np.array([])
+
+        preds_payload = [int(v) for v in preds_arr]
+        conf_payload = [float(v) if np.isfinite(v) else None for v in conf_arr]
+        stage_payload = [str(v) if v is not None else None for v in stage_arr]
+        reason_payload = [str(v) if v is not None else None for v in reason_arr]
+
+        self._writer.writerow(
+            [
+                "prediction",
+                f"{time.time():.6f}",
+                input_format,
+                "",
+                "",
+                "",
+                json.dumps(preds_payload),
+                json.dumps(conf_payload),
+                json.dumps(stage_payload),
+                json.dumps(reason_payload),
+            ]
+        )
+        self._fh.flush()
+
+    def close(self) -> None:
+        self._fh.close()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -176,122 +265,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=1.0,
         help="Alert POST timeout in seconds.",
     )
-    return parser
-
-
-def _log_prediction_counts(prediction_counts: Counter[int], log: logging.Logger) -> None:
-    if not prediction_counts:
-        return
-
-    log.info("Prediction counts:")
-    for cls_id, count in prediction_counts.items():
-        try:
-            cls_name = OperatingCondition(cls_id).name
-        except ValueError:
-            cls_name = f"Unknown({cls_id})"
-        log.info("  %s: %s", cls_name, count)
-
-
-def _is_calibration_preprocessor(value: object) -> bool:
-    return isinstance(value, CalibrationZNormalizer)
-
-
-def _calibration_preprocessor_name(value: object) -> str:
-    if isinstance(value, CalibrationZNormalizer):
-        return "calibration_z"
-    raise TypeError(f"Unsupported calibration preprocessor: {type(value)!r}")
-
-
-def _fit_runtime_calibration_preprocessor(
-    template,
-    calibration_windows,
-):
-    if isinstance(template, CalibrationZNormalizer):
-        return CalibrationZNormalizer.fit(calibration_windows)
-    raise TypeError(f"Unsupported calibration preprocessor template: {type(template)!r}")
-
-def _collect_calibration_targets(pipeline) -> list[tuple[object, str, str]]:
-    targets: list[tuple[object, str, str]] = []
-
-    direct_pre = getattr(pipeline, "preprocessor", None)
-    if _is_calibration_preprocessor(direct_pre):
-        targets.append((pipeline, "preprocessor", "preprocessor"))
-
-    classifier_pipeline = getattr(pipeline, "classifier_pipeline", None)
-    classifier_pre = getattr(classifier_pipeline, "preprocessor", None)
-    if _is_calibration_preprocessor(classifier_pre):
-        targets.append((classifier_pipeline, "preprocessor", "preprocessor"))
-
-    anomaly_detector = getattr(pipeline, "anomaly_detector", None)
-    anomaly_pre = getattr(anomaly_detector, "preprocessor", None)
-    if _is_calibration_preprocessor(anomaly_pre):
-        targets.append((anomaly_detector, "preprocessor", "preprocessor"))
-
-    return targets
-
-
-def _apply_runtime_calibration(pipeline, calibration_windows) -> None:
-    for owner, attr, target_kind in _collect_calibration_targets(pipeline):
-        template = getattr(owner, attr)
-        if target_kind == "preprocessor":
-            calibrated = _fit_runtime_calibration_preprocessor(template, calibration_windows)
-            preprocessor_name = _calibration_preprocessor_name(calibrated)
-            preprocessor_kwargs = calibrated.export_kwargs()
-            setattr(owner, attr, calibrated)
-            if hasattr(owner, "preprocessor_name"):
-                owner.preprocessor_name = preprocessor_name
-            if hasattr(owner, "preprocessor_kwargs"):
-                owner.preprocessor_kwargs = preprocessor_kwargs
-            if hasattr(owner, "bundle") and isinstance(getattr(owner, "bundle"), dict):
-                owner.bundle["preprocessor_name"] = preprocessor_name
-                owner.bundle["preprocessor_kwargs"] = preprocessor_kwargs
-            continue
-
-        raise ValueError(f"Unknown calibration target kind: {target_kind}")
-
-
-def _apply_runtime_gate_calibration(
-    pipeline,
-    calibration_windows,
-    *,
-    enabled: bool,
-    distance_quantile: float,
-    distance_margin: float,
-    ambiguity_quantile: float,
-    ambiguity_slack: float,
-):
-    if not enabled:
-        return None
-
-    anomaly_detector = getattr(pipeline, "anomaly_detector", None)
-    if anomaly_detector is None:
-        return None
-
-    recalibrate = getattr(anomaly_detector, "recalibrate_from_normal_data", None)
-    if not callable(recalibrate):
-        return None
-
-    return recalibrate(
-        calibration_windows,
-        distance_quantile=distance_quantile,
-        distance_margin=distance_margin,
-        ambiguity_quantile=ambiguity_quantile,
-        ambiguity_slack=ambiguity_slack,
+    parser.add_argument(
+        "--record-data-path",
+        "-record-data-path",
+        type=str,
+        default=None,
+        help="Optional CSV output path to record raw samples and model predictions.",
     )
-
-
-def _format_label_counts(counts: dict[int, int]) -> str:
-    if not counts:
-        return "none"
-
-    parts = []
-    for cls_id, count in sorted(counts.items()):
-        try:
-            cls_name = OperatingCondition(cls_id).name
-        except ValueError:
-            cls_name = f"Unknown({cls_id})"
-        parts.append(f"{cls_name}={count}")
-    return ", ".join(parts)
+    return parser
 
 
 def run_broker(args: argparse.Namespace) -> int:
@@ -313,6 +294,11 @@ def run_broker(args: argparse.Namespace) -> int:
     reader: SerialReader | None = None
     ser: serial.SerialBase | None = None
     bin_parser: ADXLBinaryParser | None = None
+    recorder: BrokerDataRecorder | None = None
+
+    if args.record_data_path:
+        recorder = BrokerDataRecorder(args.record_data_path)
+        log.info("Recording samples and predictions to %s", args.record_data_path)
 
     if args.input_format == "csv":
         reader = SerialReader(port=args.port, baudrate=args.baudrate, timeout=args.timeout, buffer=buffer)
@@ -329,7 +315,7 @@ def run_broker(args: argparse.Namespace) -> int:
         preprocessor=args.preprocessor,
         anomaly_detector_path=args.anomaly_detector_path,
     )
-    calibration_targets = _collect_calibration_targets(pipeline)
+    calibration_targets = collect_calibration_targets(pipeline)
     calibration_enabled = bool(calibration_targets)
     calibration_seconds = max(0.0, float(args.calibration_seconds))
     calibration_discard_seconds = max(0.0, float(args.calibration_discard_seconds)) if calibration_enabled else 0.0
@@ -388,8 +374,8 @@ def run_broker(args: argparse.Namespace) -> int:
         if not calibration_windows:
             raise RuntimeError("Calibration did not yield any windows; cannot fit runtime preprocessor.")
 
-        _apply_runtime_calibration(pipeline, calibration_windows)
-        gate_summary = _apply_runtime_gate_calibration(
+        apply_runtime_calibration(pipeline, calibration_windows)
+        gate_summary = apply_runtime_gate_calibration(
             pipeline,
             calibration_windows,
             enabled=bool(args.gate_runtime_calibration),
@@ -413,7 +399,7 @@ def run_broker(args: argparse.Namespace) -> int:
                     "unknown_before=%d, unknown_after=%d"
                 ),
                 gate_summary["num_windows"],
-                _format_label_counts(gate_summary["nearest_label_counts"]),
+                format_label_counts(gate_summary["nearest_label_counts"]),
                 gate_summary["distance_floor"],
                 gate_summary["old_fallback_threshold"],
                 gate_summary["new_fallback_threshold"],
@@ -426,6 +412,9 @@ def run_broker(args: argparse.Namespace) -> int:
 
     def handle_sample(ax: float, ay: float, az: float) -> None:
         nonlocal calibration_samples_seen, discard_logged_complete
+
+        if recorder is not None:
+            recorder.record_sample(input_format=args.input_format, ax=ax, ay=ay, az=az)
 
         if not calibration_complete:
             seconds_before = calibration_samples_seen / wb_fs if wb_fs > 0 else 0.0
@@ -457,6 +446,14 @@ def run_broker(args: argparse.Namespace) -> int:
                 details = predict_details([window])
                 preds = details["predictions"]
                 confs = details["confidence"]
+                if recorder is not None:
+                    recorder.record_prediction(
+                        input_format=args.input_format,
+                        preds=preds,
+                        confs=confs,
+                        rejection_stage=details.get("rejection_stage"),
+                        rejection_reason=details.get("rejection_reason"),
+                    )
                 record_predictions(
                     preds,
                     confs,
@@ -468,6 +465,8 @@ def run_broker(args: argparse.Namespace) -> int:
                 )
             else:
                 preds, confs = pipeline.predict_with_confidence([window])
+                if recorder is not None:
+                    recorder.record_prediction(input_format=args.input_format, preds=preds, confs=confs)
                 record_predictions(preds, confs, prediction_counts, alert_sender, log)
 
     try:
@@ -508,7 +507,7 @@ def run_broker(args: argparse.Namespace) -> int:
     finally:
         if calibration_progress is not None:
             calibration_progress.close()
-        _log_prediction_counts(prediction_counts, log)
+        log_prediction_counts(prediction_counts, log)
 
         if reader is not None:
             reader.stop()
@@ -518,6 +517,8 @@ def run_broker(args: argparse.Namespace) -> int:
                 ser.close()
             except Exception:
                 pass
+        if recorder is not None:
+            recorder.close()
 
     return 0
 

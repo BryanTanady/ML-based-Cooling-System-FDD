@@ -1,3 +1,11 @@
+## Broker module layout
+
+Broker code is now consolidated into three source files:
+
+- `main.py`: CLI and runtime orchestration
+- `prediction_utils.py`: model/pipeline construction and prediction/calibration helpers
+- `io_helpers.py`: serial reader, line parsing, window building, and alert transport
+
 ## Local test loop (broker + simulator)
 
 1) Create paired PTYs (two ends of a virtual serial cable):
