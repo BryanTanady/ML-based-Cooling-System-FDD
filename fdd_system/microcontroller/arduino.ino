@@ -109,36 +109,23 @@ void setup() {
   Serial.begin(BAUD_RATE);
   delay(200);
 
-  // 1. Initialize Sensor
-  if(!accel.begin()) {
-    // Serial.println("No ADXL345 detected! Check wiring.");
-    while(1);
-  }
-  accel.setRange(ADXL345_RANGE_2_G);
+  Wire.begin();
+  Wire.setClock(400000);
+  Wire.setTimeout(10);
 
-  
-  // 2. Spin up the Fan (Remember: 0 is ON for your P-Channel)
-  analogWrite(fanPin, 0);
-  delay(3000); 
+  try_init_accel();
+}
 
-  // 3. Calibration Phase
-  // Serial.println("Calibrating 'Normal' Vibration...");
-  float totalVibration = 0;
-  int samples = 100;
+static inline void put_u32_le(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v);
+  p[1] = (uint8_t)(v >> 8);
+  p[2] = (uint8_t)(v >> 16);
+  p[3] = (uint8_t)(v >> 24);
+}
 
-  for(int i=0; i<samples; i++) {
-    totalVibration += measureVibration();
-    delay(10);
-  }
-  
-  baselineVibration = totalVibration / samples;
-
-  accel.setDataRate(ADXL345_DATARATE_3200_HZ);
-  
-
-  // Serial.print("Baseline Vibration Level: ");
-  // Serial.println(baselineVibration);
-  // Serial.println("Sentinel Mode Active.");
+static inline void put_i16_le(uint8_t *p, int16_t v) {
+  p[0] = (uint8_t)(v);
+  p[1] = (uint8_t)((uint16_t)v >> 8);
 }
 
 void loop() {
@@ -154,41 +141,43 @@ void loop() {
     }
     return;
   }
-  
-  // --- CHANGE #2: Made "Stopped" alert less sensitive ---
-  // We now only trigger if vibration is extremely low (was 1.0)x
-  //if (currentVib < 0.5) { 
-  //   Serial.println("⚠️ ALERT: FAN STOPPED! ⚠️");
-  //}
 
-  delay(1000/1600);
-}
+  if (!schedulerInit) {
+    nextSampleUs = nowUs + SAMPLE_INTERVAL_US;
+    schedulerInit = true;
+  }
 
-// Helper function to calculate "G-Force Intensity"
-float measureVibration() {
-  sensors_event_t event; 
-  accel.getEvent(&event);
-  
-  
-  char buffer[64];
+  // If we fall behind due to host not reading, do not try to "catch up" forever.
+  // Resync if late by more than 1 interval.
+  if ((int32_t)(nowUs - nextSampleUs) >= (int32_t)SAMPLE_INTERVAL_US) {
+    nextSampleUs = nowUs + SAMPLE_INTERVAL_US;
+  }
 
-  char fx[16];
-  char fy[16];
-  char fz[16];
+  if ((int32_t)(nowUs - nextSampleUs) >= 0) {
+    nextSampleUs += SAMPLE_INTERVAL_US;
 
-  float ax = event.acceleration.x;
-  float ay = event.acceleration.y;
-  float az = event.acceleration.z;
+    int16_t x, y, z;
+    if (!read_adxl345_raw(x, y, z)) {
+      accel_ok = false;
+      return;
+    }
 
-  dtostrf(ax, 0, 2, fx);
-  dtostrf(ay, 0, 2, fy);
-  dtostrf(az, 0, 2, fz);
+    // 9-byte frame: [AA 55] [x_lo x_hi y_lo y_hi z_lo z_hi] [crc]
+    const uint8_t SYNC0 = 0xAA;
+    const uint8_t SYNC1 = 0x55;
 
-  sprintf(buffer, "x %s y %s z %s", fx, fy, fz);
-  Serial.println(buffer);
+    uint8_t frame[9];
+    frame[0] = SYNC0;
+    frame[1] = SYNC1;
 
+    put_i16_le(&frame[2], x);
+    put_i16_le(&frame[4], y);
+    put_i16_le(&frame[6], z);
 
-  // Serial.println(event.acceleration.x);
-  // Subtract gravity (approx 9.8 m/s^2) to see just the vibration
-  return 0;
+    // CRC over payload only (bytes 2..7)
+    frame[8] = crc8_maxim(&frame[2], 6);
+
+    Serial.write(frame, sizeof(frame));
+
+  }
 }
