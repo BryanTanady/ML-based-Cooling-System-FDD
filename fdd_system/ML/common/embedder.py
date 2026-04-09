@@ -757,20 +757,61 @@ class Spectrogram2DEmbedder(Embedder):
 
 
 class Raw1DCNNEmbedder(Embedder):
-    """Build channels-first (N, 3, L) tensors for 1D CNN inference."""
+    """Build channels-first (N, C, L) tensors for 1D CNN inference."""
 
     def __init__(
         self,
         target_len: int = SensorConfig.WINDOW_SIZE,
         mean: list[float] | np.ndarray | None = None,
         std: list[float] | np.ndarray | None = None,
+        axis_names: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         if target_len <= 0:
             raise ValueError("target_len must be positive.")
         self.target_len = int(target_len)
 
-        self.mean = None if mean is None else np.asarray(mean, dtype=np.float32).reshape(3, 1)
-        self.std = None if std is None else np.asarray(std, dtype=np.float32).reshape(3, 1)
+        inferred_axes_from_stats: int | None = None
+        for stats in (mean, std):
+            if stats is None:
+                continue
+            stats_size = int(np.asarray(stats, dtype=np.float32).size)
+            if stats_size <= 0:
+                continue
+            if inferred_axes_from_stats is None:
+                inferred_axes_from_stats = stats_size
+            elif inferred_axes_from_stats != stats_size:
+                raise ValueError(
+                    f"Inconsistent Raw1DCNNEmbedder stats sizes: mean/std imply {inferred_axes_from_stats} and {stats_size} axes."
+                )
+
+        if axis_names is None:
+            if inferred_axes_from_stats == 2:
+                axis_names = ("x", "y")
+            elif inferred_axes_from_stats == 3 or inferred_axes_from_stats is None:
+                axis_names = ("x", "y", "z")
+            else:
+                raise ValueError(
+                    f"Unsupported inferred axis count {inferred_axes_from_stats}; expected 2 or 3. "
+                    "Provide axis_names explicitly."
+                )
+        normalized_axes: list[str] = []
+        for axis_name in axis_names:
+            axis_key = str(axis_name).strip().lower()
+            if axis_key in {"acc_x", "x"}:
+                normalized_axes.append("x")
+            elif axis_key in {"acc_y", "y"}:
+                normalized_axes.append("y")
+            elif axis_key in {"acc_z", "z"}:
+                normalized_axes.append("z")
+            else:
+                raise ValueError(f"Unsupported Raw1DCNNEmbedder axis name: {axis_name!r}")
+        if not normalized_axes:
+            raise ValueError("Raw1DCNNEmbedder requires at least one axis.")
+        self.axis_names = tuple(normalized_axes)
+        self.num_axes = len(self.axis_names)
+
+        self.mean = None if mean is None else np.asarray(mean, dtype=np.float32).reshape(self.num_axes, 1)
+        self.std = None if std is None else np.asarray(std, dtype=np.float32).reshape(self.num_axes, 1)
         if self.std is not None:
             self.std = np.clip(self.std, 1e-6, None)
 
@@ -786,14 +827,15 @@ class Raw1DCNNEmbedder(Embedder):
     def embed(self, data: list[RawAccWindow]) -> np.ndarray:
         rows: list[np.ndarray] = []
         for w in data:
-            x = self._fix_length(w.acc_x)
-            y = self._fix_length(w.acc_y)
-            z = self._fix_length(w.acc_z)
-            sample = np.stack([x, y, z], axis=0)
+            axis_values: list[np.ndarray] = []
+            for axis_name in self.axis_names:
+                attr_name = f"acc_{axis_name}"
+                axis_values.append(self._fix_length(getattr(w, attr_name)))
+            sample = np.stack(axis_values, axis=0)
             rows.append(sample)
 
         if not rows:
-            return np.empty((0, 3, self.target_len), dtype=np.float32)
+            return np.empty((0, self.num_axes, self.target_len), dtype=np.float32)
 
         batch = np.stack(rows, axis=0).astype(np.float32)
         if self.mean is not None and self.std is not None:

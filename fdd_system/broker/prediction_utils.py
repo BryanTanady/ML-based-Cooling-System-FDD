@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import pickle
+import re
 import time
 from collections import Counter
 from pathlib import Path
@@ -117,11 +118,26 @@ def _candidate_normality_detector_paths(
 ) -> list[Path]:
     model_file = Path(model_path)
     candidates: list[Path] = []
+    model_stem = model_file.stem
+
+    model_family_prefixes: list[str] = []
+    dataset_style_match = re.match(r"^(end_to_end_data_\d+)(?:_.+)?$", model_stem)
+    if dataset_style_match:
+        model_family_prefixes.append(dataset_style_match.group(1))
+
+    legacy_dataset_style_match = re.match(r"^(end_to_end__data_\d+)(?:__.+)?$", model_stem)
+    if legacy_dataset_style_match:
+        model_family_prefixes.append(legacy_dataset_style_match.group(1))
 
     if anomaly_detector_path:
         anomaly_file = Path(anomaly_detector_path)
         anomaly_stem = anomaly_file.stem
         anomaly_suffix = anomaly_file.suffix
+
+        for family_prefix in model_family_prefixes:
+            candidates.append(anomaly_file.with_name(f"{family_prefix}_normality_detector{anomaly_suffix}"))
+            if anomaly_suffix.lower() != ".pt":
+                candidates.append(anomaly_file.with_name(f"{family_prefix}_normality_detector.pt"))
 
         if "anomaly_gate" in anomaly_stem:
             candidates.append(
@@ -135,6 +151,9 @@ def _candidate_normality_detector_paths(
         candidates.append(anomaly_file.with_name(f"{model_file.stem}_normality_detector{anomaly_suffix}"))
         candidates.append(anomaly_file.with_name(f"end_to_end_normality_detector{anomaly_suffix}"))
         candidates.append(anomaly_file.with_name("end_to_end_normality_detector.pt"))
+
+    for family_prefix in model_family_prefixes:
+        candidates.append(model_file.with_name(f"{family_prefix}_normality_detector.pt"))
 
     candidates.append(model_file.with_name("end_to_end_normality_detector.pt"))
 
@@ -190,6 +209,14 @@ def _build_embedder(embedder_name: str, *, metadata: dict[str, Any] | None = Non
         maybe_kwargs = embedder_meta.get("kwargs", {})
         if isinstance(maybe_kwargs, dict):
             kwargs = dict(maybe_kwargs)
+
+    axis_names_meta = metadata.get("model_axis_names") if isinstance(metadata, dict) else None
+    if not isinstance(axis_names_meta, list):
+        axis_names_meta = metadata.get("axis_names") if isinstance(metadata, dict) else None
+    if isinstance(axis_names_meta, list) and axis_names_meta and "axis_names" not in kwargs:
+        kwargs["axis_names"] = axis_names_meta
+    elif isinstance(metadata, dict) and bool(metadata.get("drop_z_axis")) and "axis_names" not in kwargs:
+        kwargs["axis_names"] = ["x", "y"]
 
     if embedder_name == "ml1":
         return MLEmbedder1()
@@ -344,7 +371,26 @@ def _load_torch_model(model_path: str, *, metadata: dict[str, Any] | None = None
             raise ValueError("Torch checkpoint is missing 'architecture' and metadata has no architecture.")
 
     n_classes = _extract_num_classes(checkpoint, metadata=metadata, state_dict=state_dict)
-    model = build_classifier_model(architecture, n_classes=n_classes)
+    in_channels: int | None = None
+    axis_names_meta = metadata.get("model_axis_names") if isinstance(metadata, dict) else None
+    if not isinstance(axis_names_meta, list):
+        axis_names_meta = checkpoint.get("model_axis_names")
+    if isinstance(axis_names_meta, list) and axis_names_meta:
+        in_channels = int(len(axis_names_meta))
+    elif bool((metadata or {}).get("drop_z_axis")) or bool(checkpoint.get("drop_z_axis")):
+        in_channels = 2
+    else:
+        stem_weight = state_dict.get("stem.0.weight")
+        if hasattr(stem_weight, "shape") and len(stem_weight.shape) == 3:
+            in_channels = int(stem_weight.shape[1])
+        else:
+            conv_weight = state_dict.get("features.0.weight")
+            if hasattr(conv_weight, "shape") and len(conv_weight.shape) == 3:
+                in_channels = int(conv_weight.shape[1])
+    if in_channels is None or in_channels <= 0:
+        in_channels = 3
+
+    model = build_classifier_model(architecture, n_classes=n_classes, in_channels=in_channels)
     model.load_state_dict(state_dict, strict=True)
     model.eval()
     return model
@@ -366,6 +412,102 @@ def _load_torch_checkpoint(model_path: str):
         return torch.load(model_path, map_location="cpu", weights_only=False)
     except TypeError:
         return torch.load(model_path, map_location="cpu")
+
+
+def _metadata_from_torch_checkpoint(model_path: str) -> dict[str, Any]:
+    if torch is None:
+        return {}
+
+    checkpoint = _load_torch_checkpoint(model_path)
+    if not isinstance(checkpoint, dict):
+        return {}
+
+    merged: dict[str, Any] = {}
+    for key in (
+        "architecture",
+        "drop_z_axis",
+        "model_axis_names",
+        "axis_names",
+        "window_len",
+        "preprocessor_name",
+        "preprocessor_kwargs",
+        "classifier_input_normalization",
+    ):
+        if key in checkpoint:
+            merged[key] = checkpoint[key]
+
+    if isinstance(checkpoint.get("idx_to_label"), dict) and checkpoint["idx_to_label"]:
+        merged["labels"] = {str(k): int(v) for k, v in checkpoint["idx_to_label"].items()}
+
+    if "mean" in checkpoint or "std" in checkpoint or "window_len" in checkpoint:
+        embedder_kwargs: dict[str, Any] = {}
+        if "window_len" in checkpoint:
+            try:
+                embedder_kwargs["target_len"] = int(checkpoint["window_len"])
+            except (TypeError, ValueError):
+                pass
+        if "mean" in checkpoint:
+            embedder_kwargs["mean"] = np.asarray(checkpoint["mean"], dtype=np.float32).reshape(-1).tolist()
+        if "std" in checkpoint:
+            embedder_kwargs["std"] = np.asarray(checkpoint["std"], dtype=np.float32).reshape(-1).tolist()
+
+        axis_names = checkpoint.get("model_axis_names")
+        if not isinstance(axis_names, list):
+            axis_names = checkpoint.get("axis_names")
+        if isinstance(axis_names, list) and axis_names:
+            embedder_kwargs["axis_names"] = axis_names
+        elif bool(checkpoint.get("drop_z_axis")):
+            embedder_kwargs["axis_names"] = ["x", "y"]
+
+        merged["embedder"] = {
+            "name": "raw1dcnn",
+            "kwargs": embedder_kwargs,
+        }
+
+    pre_name = checkpoint.get("preprocessor_name")
+    pre_kwargs = checkpoint.get("preprocessor_kwargs")
+    if isinstance(pre_name, str):
+        merged["preprocessor"] = {
+            "name": pre_name,
+            "kwargs": pre_kwargs if isinstance(pre_kwargs, dict) else {},
+        }
+
+    return merged
+
+
+def _merge_model_metadata(
+    sidecar_metadata: dict[str, Any] | None,
+    *,
+    model_path: str,
+    resolved_model_format: str,
+) -> dict[str, Any] | None:
+    merged: dict[str, Any] = dict(sidecar_metadata) if isinstance(sidecar_metadata, dict) else {}
+    if resolved_model_format != "torch":
+        return merged if merged else None
+
+    checkpoint_meta = _metadata_from_torch_checkpoint(model_path)
+    if not checkpoint_meta:
+        return merged if merged else None
+
+    if not merged:
+        return checkpoint_meta
+
+    for key, value in checkpoint_meta.items():
+        if key in {"embedder", "preprocessor"} and isinstance(value, dict):
+            existing = merged.get(key)
+            if isinstance(existing, dict):
+                combined = dict(value)
+                combined.update(existing)
+                if isinstance(value.get("kwargs"), dict) and isinstance(existing.get("kwargs"), dict):
+                    kwargs = dict(value["kwargs"])
+                    kwargs.update(existing["kwargs"])
+                    combined["kwargs"] = kwargs
+                merged[key] = combined
+            else:
+                merged[key] = value
+            continue
+        merged.setdefault(key, value)
+    return merged
 
 
 def load_model(model_path: str, model_format: str, *, metadata: dict[str, Any] | None = None):
@@ -399,7 +541,11 @@ def build_pipeline(
 ) -> ClassificationPipeline | KnownUnknownClassificationPipeline | NormalityFaultClassificationPipeline:
     """Construct the end-to-end classification pipeline."""
     resolved_model_format = _resolve_model_format(model_path, model_format)
-    metadata = _load_model_metadata(model_path)
+    metadata = _merge_model_metadata(
+        _load_model_metadata(model_path),
+        model_path=model_path,
+        resolved_model_format=resolved_model_format,
+    )
     classifier_can_emit_normal = _classifier_can_emit_normal_label(metadata)
 
     if normality_detector_path is None and classifier_can_emit_normal is False:
