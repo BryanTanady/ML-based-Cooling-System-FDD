@@ -12,8 +12,8 @@ class FanConfig():
 
 class SensorConfig():
     SAMPLING_RATE = 800
-    WINDOW_SIZE = 1000
-    STRIDE = 500
+    WINDOW_SIZE = 600
+    STRIDE = 300
 
     
 @dataclass(kw_only=True)

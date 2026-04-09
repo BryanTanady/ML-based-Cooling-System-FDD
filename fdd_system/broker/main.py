@@ -9,14 +9,10 @@ Example usage:
       --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.pt \
       --model-format torch \
       --embedder auto \
-      --preprocessor rms \
-      --normality-detector-path experiment/weights/end_to_end_normality_detector.pt \
+      --preprocessor auto \
       --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt \
-      --calibration-seconds 20 \
-      --calibration-discard-seconds 2 \
-      --adabn-runtime-calibration \
-      --adabn-ema-momentum 0.1 \
-      --gate-runtime-calibration
+      --no-adabn-runtime-calibration \
+      --no-gate-runtime-calibration
 """
 
 from __future__ import annotations
@@ -45,6 +41,7 @@ from fdd_system.broker.prediction_utils import (
     apply_runtime_gate_calibration,
     build_pipeline,
     format_label_counts,
+    log_live_debug_stats,
     log_prediction_counts,
     record_predictions,
     supports_runtime_adabn,
@@ -52,87 +49,58 @@ from fdd_system.broker.prediction_utils import (
 )
 
 EXAMPLE_USAGE = """Examples:
-  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.pt --model-format torch --embedder auto --preprocessor rms --normality-detector-path experiment/weights/end_to_end_normality_detector.pt --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt --calibration-seconds 20 --calibration-discard-seconds 2 --adabn-runtime-calibration --adabn-ema-momentum 0.1 --gate-runtime-calibration
+  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.pt --model-format torch --embedder auto --preprocessor auto --no-adabn-runtime-calibration --no-gate-runtime-calibration
 """
 
 
 class BrokerDataRecorder:
-    """Append broker samples and predictions to a CSV file."""
+    """Write broker samples to the same CSV schema used by data_collection/getData2.py."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, fs_hz: float):
         out_path = Path(path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = (not out_path.exists()) or out_path.stat().st_size == 0
-        self._fh = out_path.open("a", encoding="utf-8", newline="")
+        self._fh = out_path.open("w", encoding="utf-8", newline="")
         self._writer = csv.writer(self._fh)
-        if write_header:
-            self._writer.writerow(
-                [
-                    "row_type",
-                    "ts",
-                    "input_format",
-                    "ax",
-                    "ay",
-                    "az",
-                    "predictions",
-                    "confidences",
-                    "rejection_stage",
-                    "rejection_reason",
-                ]
-            )
-            self._fh.flush()
+        self._writer.writerow(["idx", "t_us", "X", "Y", "Z", "t_s"])
+        self._fh.flush()
+        self._interval_us = int(round(1_000_000.0 / float(fs_hz))) if float(fs_hz) > 0 else 0
+        self._next_idx = 0
 
-    def record_sample(self, *, input_format: str, ax: float, ay: float, az: float) -> None:
+    def record_sample(
+        self,
+        *,
+        ax: float,
+        ay: float,
+        az: float,
+        idx: int | None = None,
+        t_us: int | None = None,
+    ) -> None:
+        row_idx = int(idx) if idx is not None else self._next_idx
+        row_t_us = int(t_us) if t_us is not None else row_idx * self._interval_us
         self._writer.writerow(
             [
-                "sample",
-                f"{time.time():.6f}",
-                input_format,
-                f"{ax:.9f}",
-                f"{ay:.9f}",
-                f"{az:.9f}",
-                "",
-                "",
-                "",
-                "",
+                row_idx,
+                row_t_us,
+                float(ax),
+                float(ay),
+                float(az),
+                float(row_t_us) / 1_000_000.0,
             ]
         )
+        self._next_idx = row_idx + 1
         self._fh.flush()
 
     def record_prediction(
         self,
         *,
-        input_format: str,
         preds,
         confs,
         rejection_stage=None,
         rejection_reason=None,
     ) -> None:
-        preds_arr = np.asarray(preds).ravel()
-        conf_arr = np.asarray(confs, dtype=float).ravel()
-        stage_arr = np.asarray(rejection_stage, dtype=object).ravel() if rejection_stage is not None else np.array([])
-        reason_arr = np.asarray(rejection_reason, dtype=object).ravel() if rejection_reason is not None else np.array([])
-
-        preds_payload = [int(v) for v in preds_arr]
-        conf_payload = [float(v) if np.isfinite(v) else None for v in conf_arr]
-        stage_payload = [str(v) if v is not None else None for v in stage_arr]
-        reason_payload = [str(v) if v is not None else None for v in reason_arr]
-
-        self._writer.writerow(
-            [
-                "prediction",
-                f"{time.time():.6f}",
-                input_format,
-                "",
-                "",
-                "",
-                json.dumps(preds_payload),
-                json.dumps(conf_payload),
-                json.dumps(stage_payload),
-                json.dumps(reason_payload),
-            ]
-        )
-        self._fh.flush()
+        # Keep signature for existing call sites; no-op by design so recorded CSV
+        # exactly matches getData2.py format (sample rows only).
+        _ = (preds, confs, rejection_stage, rejection_reason)
 
     def close(self) -> None:
         self._fh.close()
@@ -143,6 +111,22 @@ def _resolve_adabn_ema_momentum(model_path: str, cli_value: float | None, log: l
     if cli_value is not None:
         return float(cli_value), "cli"
 
+    metadata, meta_source = _load_runtime_calibration_metadata(model_path, log)
+    if metadata is not None:
+        value = metadata.get("runtime_calibration", {}).get("adabn", {}).get("ema_momentum")
+        if value is not None:
+            try:
+                return float(value), f"metadata:{meta_source}"
+            except (TypeError, ValueError):
+                log.warning("Invalid runtime_calibration.adabn.ema_momentum in %s: %r", meta_source, value)
+
+    return 0.1, "default"
+
+
+def _load_runtime_calibration_metadata(
+    model_path: str,
+    log: logging.Logger,
+) -> tuple[dict[str, object] | None, str | None]:
     meta_candidates = [
         Path(model_path).with_suffix(".meta.json"),
         Path(model_path).with_name(f"{Path(model_path).stem}.meta.json"),
@@ -155,19 +139,48 @@ def _resolve_adabn_ema_momentum(model_path: str, cli_value: float | None, log: l
         except Exception as exc:
             log.warning("Failed to parse model metadata at %s: %s", meta_path, exc)
             continue
-        value = (
-            payload.get("runtime_calibration", {})
-            .get("adabn", {})
-            .get("ema_momentum")
-        )
-        if value is None:
-            continue
-        try:
-            return float(value), f"metadata:{meta_path.name}"
-        except (TypeError, ValueError):
-            log.warning("Invalid runtime_calibration.adabn.ema_momentum in %s: %r", meta_path, value)
+        if isinstance(payload, dict):
+            return payload, meta_path.name
+        log.warning("Ignoring non-mapping model metadata at %s", meta_path)
+    return None, None
 
-    return 0.1, "default"
+
+def _coerce_optional_bool(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value in {0, 1}:
+            return bool(value)
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _resolve_runtime_calibration_enabled(
+    model_path: str,
+    cli_value: bool | None,
+    log: logging.Logger,
+    *,
+    kind: str,
+) -> tuple[bool, str]:
+    if cli_value is not None:
+        return bool(cli_value), "cli"
+
+    metadata, meta_source = _load_runtime_calibration_metadata(model_path, log)
+    if metadata is not None:
+        value = metadata.get("runtime_calibration", {}).get(kind, {}).get("enabled")
+        parsed = _coerce_optional_bool(value)
+        if parsed is not None:
+            return parsed, f"metadata:{meta_source}"
+        if value is not None:
+            log.warning("Invalid runtime_calibration.%s.enabled in %s: %r", kind, meta_source, value)
+
+    return False, "default"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -238,9 +251,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "median",
             "standard",
             "rms",
+            "centered_rms",
         ],
         default="auto",
-        help="Input preprocessor. Default is basic unless overridden by ONNX metadata.",
+        help=(
+            "Input preprocessor. Default is basic unless overridden by ONNX metadata. "
+            "'centered_rms' subtracts per-axis window bias before RMS scaling."
+        ),
     )
     parser.add_argument(
         "--calibration-seconds",
@@ -260,10 +277,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gate-runtime-calibration",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help=(
             "Adapt the KNOWN/UNKNOWN gate using the target-normal startup calibration windows "
-            "after preprocessing with the runtime pipeline."
+            "after preprocessing with the runtime pipeline. "
+            "If omitted, broker falls back to model metadata when available; otherwise disabled."
         ),
     )
     parser.add_argument(
@@ -293,10 +311,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--adabn-runtime-calibration",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=None,
         help=(
             "Recalibrate torch classifier BatchNorm running statistics (AdaBN) using startup calibration windows "
-            "after preprocessing/embedder normalization."
+            "after preprocessing/embedder normalization. "
+            "If omitted, broker falls back to model metadata when available; otherwise disabled."
         ),
     )
     parser.add_argument(
@@ -345,7 +364,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "-record-data-path",
         type=str,
         default=None,
-        help="Optional CSV output path to record raw samples and model predictions.",
+        help="Optional CSV output path to record raw samples in getData2 format (idx,t_us,X,Y,Z,t_s).",
+    )
+    parser.add_argument(
+        "--debug-live-stats",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Log per-window raw/preprocessed/embedder channel stats plus gate distance details. "
+            "Useful for comparing notebook windows against live deployment drift."
+        ),
     )
     return parser
 
@@ -372,8 +400,8 @@ def run_broker(args: argparse.Namespace) -> int:
     recorder: BrokerDataRecorder | None = None
 
     if args.record_data_path:
-        recorder = BrokerDataRecorder(args.record_data_path)
-        log.info("Recording samples and predictions to %s", args.record_data_path)
+        recorder = BrokerDataRecorder(args.record_data_path, fs_hz=float(args.fs_hz))
+        log.info("Recording raw samples to %s (idx,t_us,X,Y,Z,t_s)", args.record_data_path)
 
     if args.input_format == "csv":
         reader = SerialReader(port=args.port, baudrate=args.baudrate, timeout=args.timeout, buffer=buffer)
@@ -427,8 +455,22 @@ def run_broker(args: argparse.Namespace) -> int:
     if effective_normality_detector is None and isinstance(pipeline, NormalityFaultClassificationPipeline):
         effective_normality_detector = "auto-detected"
 
-    gate_calibration_enabled = bool(args.gate_runtime_calibration) and supports_runtime_gate_calibration(pipeline)
-    adabn_calibration_enabled = bool(args.adabn_runtime_calibration) and supports_runtime_adabn(pipeline)
+    requested_gate_calibration, gate_calibration_source = _resolve_runtime_calibration_enabled(
+        args.model_path,
+        args.gate_runtime_calibration,
+        log,
+        kind="gate",
+    )
+    requested_adabn_calibration, adabn_enabled_source = _resolve_runtime_calibration_enabled(
+        args.model_path,
+        args.adabn_runtime_calibration,
+        log,
+        kind="adabn",
+    )
+    gate_calibration_supported = supports_runtime_gate_calibration(pipeline)
+    adabn_calibration_supported = supports_runtime_adabn(pipeline)
+    gate_calibration_enabled = requested_gate_calibration and gate_calibration_supported
+    adabn_calibration_enabled = requested_adabn_calibration and adabn_calibration_supported
     calibration_enabled = gate_calibration_enabled or adabn_calibration_enabled
     calibration_seconds = max(0.0, float(args.calibration_seconds))
     calibration_discard_seconds = max(0.0, float(args.calibration_discard_seconds)) if calibration_enabled else 0.0
@@ -464,7 +506,7 @@ def run_broker(args: argparse.Namespace) -> int:
             "Broker started. Reading from %s @ %s baud (format=%s, fs_hz=%.3f, alert_api=%s, asset_id=%s, "
             "pipeline=%s, "
             "normality_detector=%s, anomaly_detector=%s, stage0_validator=%s, calibration=%s, gate_calibration=%s, "
-            "adabn=%s, adabn_ema_momentum=%.4f (%s))"
+            "adabn=%s, adabn_ema_momentum=%.4f (%s), debug_live_stats=%s)"
         ),
         args.port,
         args.baudrate,
@@ -481,10 +523,27 @@ def run_broker(args: argparse.Namespace) -> int:
             if calibration_enabled
             else "disabled"
         ),
-        "enabled" if gate_calibration_enabled else "disabled",
-        "enabled" if adabn_calibration_enabled else "disabled",
+        (
+            f"enabled ({gate_calibration_source})"
+            if gate_calibration_enabled
+            else (
+                f"disabled:unsupported ({gate_calibration_source})"
+                if requested_gate_calibration and not gate_calibration_supported
+                else f"disabled ({gate_calibration_source})"
+            )
+        ),
+        (
+            f"enabled ({adabn_enabled_source})"
+            if adabn_calibration_enabled
+            else (
+                f"disabled:unsupported ({adabn_enabled_source})"
+                if requested_adabn_calibration and not adabn_calibration_supported
+                else f"disabled ({adabn_enabled_source})"
+            )
+        ),
         adabn_ema_momentum,
         adabn_momentum_source,
+        "enabled" if bool(args.debug_live_stats) else "disabled",
     )
     if calibration_enabled and not calibration_complete:
         if calibration_discard_seconds > 0:
@@ -590,11 +649,11 @@ def run_broker(args: argparse.Namespace) -> int:
             )
         log.info("Calibration complete. Broker ready for inference.")
 
-    def handle_sample(ax: float, ay: float, az: float) -> None:
+    def handle_sample(ax: float, ay: float, az: float, *, idx: int | None = None, t_us: int | None = None) -> None:
         nonlocal calibration_samples_seen, discard_logged_complete
 
         if recorder is not None:
-            recorder.record_sample(input_format=args.input_format, ax=ax, ay=ay, az=az)
+            recorder.record_sample(ax=ax, ay=ay, az=az, idx=idx, t_us=t_us)
 
         if not calibration_complete:
             seconds_before = calibration_samples_seen / wb_fs if wb_fs > 0 else 0.0
@@ -634,7 +693,6 @@ def run_broker(args: argparse.Namespace) -> int:
                     )
                     if recorder is not None:
                         recorder.record_prediction(
-                            input_format=args.input_format,
                             preds=preds,
                             confs=confs,
                             rejection_stage=rejection_stage,
@@ -649,6 +707,8 @@ def run_broker(args: argparse.Namespace) -> int:
                         rejection_stage=rejection_stage,
                         rejection_reason=rejection_reason,
                     )
+                    if bool(args.debug_live_stats):
+                        log_live_debug_stats(pipeline, [window], log)
                     return
 
             predict_details = getattr(pipeline, "predict_details", None)
@@ -658,7 +718,6 @@ def run_broker(args: argparse.Namespace) -> int:
                 confs = details["confidence"]
                 if recorder is not None:
                     recorder.record_prediction(
-                        input_format=args.input_format,
                         preds=preds,
                         confs=confs,
                         rejection_stage=details.get("rejection_stage"),
@@ -673,11 +732,15 @@ def run_broker(args: argparse.Namespace) -> int:
                     rejection_stage=details.get("rejection_stage"),
                     rejection_reason=details.get("rejection_reason"),
                 )
+                if bool(args.debug_live_stats):
+                    log_live_debug_stats(pipeline, [window], log)
             else:
                 preds, confs = pipeline.predict_with_confidence([window])
                 if recorder is not None:
-                    recorder.record_prediction(input_format=args.input_format, preds=preds, confs=confs)
+                    recorder.record_prediction(preds=preds, confs=confs)
                 record_predictions(preds, confs, prediction_counts, alert_sender, log)
+                if bool(args.debug_live_stats):
+                    log_live_debug_stats(pipeline, [window], log)
 
     try:
         while True:
@@ -710,7 +773,7 @@ def run_broker(args: argparse.Namespace) -> int:
                 continue
 
             for sample in samples:
-                handle_sample(float(sample.x), float(sample.y), float(sample.z))
+                handle_sample(float(sample.x), float(sample.y), float(sample.z), idx=int(sample.idx), t_us=int(sample.t_us))
 
     except KeyboardInterrupt:
         log.info("Broker stopping (Ctrl+C).")

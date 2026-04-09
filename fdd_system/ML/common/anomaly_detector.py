@@ -21,6 +21,7 @@ from fdd_system.ML.common.config import OperatingCondition, RawAccWindow
 from fdd_system.ML.common.embedder import Raw1DCNNEmbedder
 from fdd_system.ML.common.preprocessor import (
     CalibrationZNormalizer,
+    CenteredRMSNormalization,
     DummyPreprocessor,
     MedianRemoval,
     Preprocessor,
@@ -45,7 +46,7 @@ DEFAULT_RUNTIME_GATE_AMBIGUITY_SLACK = 0.05
 DEFAULT_RUNTIME_NORMALITY_MAX_THRESHOLD_SCALE = 1.50
 DEFAULT_RUNTIME_NORMALITY_CAP_MAX_UNKNOWN_BEFORE = 0.10
 DEFAULT_STAGE0_RMS_MODE = "raw"
-DEFAULT_STAGE0_RMS_LOWER_Q = 0.05
+DEFAULT_STAGE0_RMS_LOWER_Q = 0.01
 DEFAULT_STAGE0_RMS_UPPER_Q = 0.95
 DEFAULT_STAGE0_RMS_LOWER_SCALE = 0.85
 DEFAULT_STAGE0_RMS_UPPER_SCALE = 1.15
@@ -963,6 +964,8 @@ def _make_preprocessor(name: str, kwargs: Mapping[str, Any] | None = None) -> Pr
         return StandardZNormal(**init_kwargs)
     if normalized == "rms":
         return RMSNormalization(**init_kwargs)
+    if normalized == "centered_rms":
+        return CenteredRMSNormalization(**init_kwargs)
     raise ValueError(f"Unknown anomaly-detector preprocessor '{name}'.")
 
 

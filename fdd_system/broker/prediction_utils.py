@@ -34,6 +34,7 @@ from fdd_system.ML.common.inferrer import OnnxInferrer, SklearnMLInferrer, Torch
 from fdd_system.ML.common.model import build_classifier_model
 from fdd_system.ML.common.preprocessor import (
     CalibrationZNormalizer,
+    CenteredRMSNormalization,
     DummyPreprocessor,
     MedianRemoval,
     RMSNormalization,
@@ -221,6 +222,7 @@ def _build_preprocessor(preprocessor_name: str, *, metadata: dict[str, Any] | No
                 "robust": {"robust", "standard"},
                 "standard": {"robust", "standard"},
                 "rms": {"rms"},
+                "centered_rms": {"centered_rms"},
             }
             if meta_name in compatible_names.get(preprocessor_name, {preprocessor_name}):
                 kwargs = dict(maybe_kwargs)
@@ -235,6 +237,8 @@ def _build_preprocessor(preprocessor_name: str, *, metadata: dict[str, Any] | No
         return StandardZNormal(**kwargs)
     if preprocessor_name == "rms":
         return RMSNormalization(**kwargs)
+    if preprocessor_name == "centered_rms":
+        return CenteredRMSNormalization(**kwargs)
 
     raise ValueError(f"Unknown preprocessor '{preprocessor_name}'.")
 
@@ -529,6 +533,7 @@ def record_predictions(
         else:
             unknown_source_fmt.append("UNKNOWN")
 
+    logger.info("")
     logger.info(
         "Prediction: %s, %s | conf=%s | unknown_source=%s",
         preds_arr.tolist(),
@@ -548,6 +553,190 @@ def record_predictions(
 
         if pred_id != OperatingCondition.NORMAL.value:
             alert_sender.send_prediction(pred_id, confidence, ts=now_ts)
+
+
+def _label_name(label: object) -> str:
+    try:
+        return OperatingCondition(int(label)).name
+    except (TypeError, ValueError):
+        return f"Unknown({label})"
+
+
+def _fmt_float(value: object, *, precision: int = 4) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "nan"
+    if not np.isfinite(number):
+        return "nan"
+    return f"{number:.{precision}f}"
+
+
+def _summarize_numeric_array(values: object) -> str:
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return "n=0"
+
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return f"n={int(arr.size)} finite=0"
+
+    rms = float(np.sqrt(np.mean(finite**2)))
+    return (
+        f"n={int(arr.size)} "
+        f"mu={_fmt_float(np.mean(finite))} "
+        f"sd={_fmt_float(np.std(finite))} "
+        f"rms={_fmt_float(rms)} "
+        f"lo={_fmt_float(np.min(finite))} "
+        f"hi={_fmt_float(np.max(finite))}"
+    )
+
+
+def _summarize_window_axes(window: object) -> str:
+    parts: list[str] = []
+    for axis_name, attr_name in (("x", "acc_x"), ("y", "acc_y"), ("z", "acc_z")):
+        values = getattr(window, attr_name, None)
+        parts.append(f"{axis_name}[{_summarize_numeric_array(values)}]")
+    return " ".join(parts)
+
+
+def _summarize_feature_sample(sample: object) -> str:
+    arr = np.asarray(sample, dtype=np.float32)
+    if arr.ndim == 2 and arr.shape[0] == 3:
+        parts = []
+        for axis_name, axis_values in zip(("x", "y", "z"), arr, strict=False):
+            parts.append(f"{axis_name}[{_summarize_numeric_array(axis_values)}]")
+        return " ".join(parts)
+
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return f"shape={list(arr.shape)} finite=0"
+
+    return (
+        f"shape={list(arr.shape)} "
+        f"mu={_fmt_float(np.mean(finite))} "
+        f"sd={_fmt_float(np.std(finite))} "
+        f"lo={_fmt_float(np.min(finite))} "
+        f"hi={_fmt_float(np.max(finite))}"
+    )
+
+
+def _collect_anomaly_detectors_for_debug(pipeline) -> list[tuple[str, object]]:
+    detectors: list[tuple[str, object]] = []
+    current = pipeline
+    visited_ids: set[int] = set()
+    depth = 0
+    while current is not None and id(current) not in visited_ids:
+        visited_ids.add(id(current))
+        detector = getattr(current, "anomaly_detector", None)
+        if detector is not None:
+            detectors.append((f"{depth}:{type(current).__name__}", detector))
+        current = getattr(current, "classifier_pipeline", None)
+        depth += 1
+    return detectors
+
+
+def log_live_debug_stats(
+    pipeline,
+    raw_inputs,
+    logger: logging.Logger,
+) -> None:
+    samples = list(raw_inputs)
+    if not samples:
+        return
+
+    try:
+        classifier_pipeline = _resolve_classifier_pipeline(pipeline)
+        preprocessor = getattr(classifier_pipeline, "preprocessor", None)
+        embedder = getattr(classifier_pipeline, "embedder", None)
+        inferrer = getattr(classifier_pipeline, "inferrer", None)
+
+        processed_inputs = (
+            list(preprocessor.preprocess(samples))
+            if preprocessor is not None and hasattr(preprocessor, "preprocess")
+            else list(samples)
+        )
+
+        feature_batch: np.ndarray | None = None
+        if embedder is not None and hasattr(embedder, "embed") and processed_inputs:
+            feature_batch = np.asarray(embedder.embed(processed_inputs), dtype=np.float32)
+
+        classifier_preds: np.ndarray | None = None
+        classifier_confs: np.ndarray | None = None
+        if (
+            feature_batch is not None
+            and feature_batch.shape[0] > 0
+            and inferrer is not None
+            and hasattr(inferrer, "infer_with_confidence")
+        ):
+            classifier_preds, classifier_confs = inferrer.infer_with_confidence(feature_batch)
+            classifier_preds = np.asarray(classifier_preds, dtype=np.int64).reshape(-1)
+            classifier_confs = np.asarray(classifier_confs, dtype=float).reshape(-1)
+
+        detector_debug_details: list[tuple[str, dict[str, np.ndarray]]] = []
+        for detector_name, detector in _collect_anomaly_detectors_for_debug(pipeline):
+            predict_details = getattr(detector, "predict_details", None)
+            if callable(predict_details):
+                detector_debug_details.append((detector_name, predict_details(samples)))
+
+        pre_name = type(preprocessor).__name__ if preprocessor is not None else "none"
+        embed_name = type(embedder).__name__ if embedder is not None else "none"
+        inferrer_name = type(inferrer).__name__ if inferrer is not None else "none"
+
+        for idx, sample in enumerate(samples):
+            lines = [
+                f"LiveDebug window={idx}",
+                f"  raw   {_summarize_window_axes(sample)}",
+            ]
+            if idx < len(processed_inputs):
+                lines.append(
+                    f"  pre[{pre_name}]   {_summarize_window_axes(processed_inputs[idx])}"
+                )
+            if feature_batch is not None and idx < feature_batch.shape[0]:
+                lines.append(
+                    f"  emb[{embed_name}]  {_summarize_feature_sample(feature_batch[idx])}"
+                )
+
+            for detector_name, details in detector_debug_details:
+                stage0_valid = ""
+                stage0_reason = ""
+                if "stage0_valid" in details and idx < np.asarray(details["stage0_valid"]).size:
+                    stage0_valid = str(int(np.asarray(details["stage0_valid"], dtype=np.int64).reshape(-1)[idx]))
+                if "stage0_reason" in details and idx < np.asarray(details["stage0_reason"], dtype=object).size:
+                    stage0_reason = str(np.asarray(details["stage0_reason"], dtype=object).reshape(-1)[idx])
+
+                nearest_label = -1
+                if "nearest_label" in details and idx < np.asarray(details["nearest_label"]).size:
+                    nearest_label = int(np.asarray(details["nearest_label"], dtype=np.int64).reshape(-1)[idx])
+
+                second_label = -1
+                if "second_label" in details and idx < np.asarray(details["second_label"]).size:
+                    second_label = int(np.asarray(details["second_label"], dtype=np.int64).reshape(-1)[idx])
+
+                lines.append(
+                    (
+                        f"  gate[{detector_name}] "
+                        f"s0={stage0_valid or '?'} reason={stage0_reason or '-'} "
+                        f"near={_label_name(nearest_label)} d={_fmt_float(np.asarray(details.get('distance', np.empty((0,))), dtype=float).reshape(-1)[idx]) if 'distance' in details and idx < np.asarray(details['distance']).size else 'nan'} "
+                        f"thr={_fmt_float(np.asarray(details.get('applied_threshold', np.empty((0,))), dtype=float).reshape(-1)[idx]) if 'applied_threshold' in details and idx < np.asarray(details['applied_threshold']).size else 'nan'} "
+                        f"second={_label_name(second_label)} d2={_fmt_float(np.asarray(details.get('second_distance', np.empty((0,))), dtype=float).reshape(-1)[idx]) if 'second_distance' in details and idx < np.asarray(details['second_distance']).size else 'nan'} "
+                        f"ratio={_fmt_float(np.asarray(details.get('distance_ratio', np.empty((0,))), dtype=float).reshape(-1)[idx]) if 'distance_ratio' in details and idx < np.asarray(details['distance_ratio']).size else 'nan'} "
+                        f"unk={str(int(np.asarray(details.get('is_unknown', np.empty((0,))), dtype=np.int64).reshape(-1)[idx])) if 'is_unknown' in details and idx < np.asarray(details['is_unknown']).size else '?'} "
+                        f"conf={_fmt_float(np.asarray(details.get('decision_confidence', np.empty((0,))), dtype=float).reshape(-1)[idx]) if 'decision_confidence' in details and idx < np.asarray(details['decision_confidence']).size else 'nan'}"
+                    )
+                )
+
+            if classifier_preds is not None and idx < classifier_preds.size:
+                lines.append(
+                    f"  clf[{inferrer_name}] pred={_label_name(int(classifier_preds[idx]))} "
+                    f"conf={_fmt_float(classifier_confs[idx] if classifier_confs is not None and idx < classifier_confs.size else np.nan)}"
+                )
+
+            logger.info("")
+            logger.info("\n".join(lines))
+            logger.info("")
+    except Exception as exc:  # pragma: no cover - best-effort debug instrumentation
+        logger.warning("Live debug stats failed: %s", exc)
 
 
 def log_prediction_counts(prediction_counts: Counter[int], log: logging.Logger) -> None:

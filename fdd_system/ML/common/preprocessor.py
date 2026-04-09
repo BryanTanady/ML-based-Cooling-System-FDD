@@ -224,6 +224,56 @@ class RMSNormalization(Preprocessor):
         return cleaned
 
 
+class CenteredRMSNormalization(RMSNormalization):
+    """Remove per-axis bias, then normalize by centered mean magnitude.
+
+    This variant is intended for setups where one axis can carry a large
+    quasi-constant gravity or mounting offset. By centering each axis per
+    window before RMS scaling, it avoids baking that offset into the signal and
+    reduces downstream sensitivity to tiny live bias shifts.
+    """
+
+    def __init__(self, eps: float = 1e-8, center: str = "mean") -> None:
+        super().__init__(eps=eps)
+        normalized_center = str(center).strip().lower()
+        if normalized_center not in {"mean", "median"}:
+            raise ValueError("CenteredRMSNormalization center must be 'mean' or 'median'.")
+        self.center = normalized_center
+
+    def export_kwargs(self) -> dict[str, float | str]:
+        return {
+            "eps": float(self._eps),
+            "center": self.center,
+        }
+
+    def _center_axis(self, arr: np.ndarray) -> np.ndarray:
+        arr = arr.astype(float)
+        if arr.size == 0:
+            return arr
+
+        if self.center == "median":
+            offset = float(np.median(arr))
+        else:
+            offset = float(np.mean(arr))
+        if not np.isfinite(offset):
+            offset = 0.0
+        return arr - offset
+
+    def _normalize_axes(self, ax: np.ndarray, ay: np.ndarray, az: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ax_centered = self._center_axis(ax)
+        ay_centered = self._center_axis(ay)
+        az_centered = self._center_axis(az)
+        centered_mag = np.sqrt(ax_centered**2 + ay_centered**2 + az_centered**2)
+        denom = float(np.sum(centered_mag) / centered_mag.size) if centered_mag.size else 1.0
+        if not np.isfinite(denom) or denom < self._eps:
+            denom = 1.0
+        ax_norm = ax_centered / denom
+        ay_norm = ay_centered / denom
+        az_norm = az_centered / denom
+        mag_norm = np.sqrt(ax_norm**2 + ay_norm**2 + az_norm**2)
+        return ax_norm, ay_norm, az_norm, mag_norm
+
+
 class CalibrationZNormalizer(Preprocessor):
     """Normalize each axis using calibration-derived global mean and standard deviation."""
 

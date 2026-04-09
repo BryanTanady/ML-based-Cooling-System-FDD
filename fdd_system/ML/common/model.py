@@ -93,6 +93,46 @@ class Fan1DCNN(nn.Module):
         return self.classifier(self.features(x))
 
 
+class Fan1DCNNV2(nn.Module):
+    def __init__(self, n_classes: int, in_channels: int = 3):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv1d(in_channels, 32, kernel_size=7, padding=3),
+            nn.GroupNorm(8, 32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),
+            nn.GroupNorm(8, 64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=2),
+            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 128),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128, 64),
+            nn.ReLU(inplace=True),
+            nn.Dropout(p=0.3),
+            nn.Linear(64, n_classes),
+        )
+
+    def extract_embedding(self, x):
+        h = self.features(x)
+        h = self.classifier[0](h)
+        h = self.classifier[1](h)
+        h = self.classifier[2](h)
+        return h
+
+    def forward(self, x):
+        return self.classifier(self.features(x))
+
+
 class HybridTimeFreq1DCNN(nn.Module):
     def __init__(self, n_classes: int, in_channels: int = 3, width: int = 48):
         super().__init__()
@@ -137,6 +177,8 @@ def build_classifier_model(architecture: str, *, n_classes: int, in_channels: in
     architecture_key = str(architecture).strip().lower()
     if architecture_key == "fan1d":
         return Fan1DCNN(n_classes=n_classes, in_channels=in_channels)
+    if architecture_key in {"fan1d_v2", "fan1dcnn_v2"}:
+        return Fan1DCNNV2(n_classes=n_classes, in_channels=in_channels)
     if architecture_key == "hybrid_timefreq":
         return HybridTimeFreq1DCNN(n_classes=n_classes, in_channels=in_channels)
     if architecture_key in {"spectrogram2d", "fan_spectrogram_cnn"}:
