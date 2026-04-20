@@ -5,7 +5,7 @@
 Emulated data-center rack setup used for testing and validation:
 
 <p align="center">
-  <img src="assets/setup.png" alt="Setup emulation" width="300" />
+  <img src="assets/setup.png" alt="Setup emulation" width="500" />
 </p>
 
 ## System Architecture 🧩
