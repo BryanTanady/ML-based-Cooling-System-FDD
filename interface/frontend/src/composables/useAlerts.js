@@ -10,7 +10,7 @@ export function useAlerts() {
   const status = ref('disconnected') // disconnected | connecting | connected | error
   const current = ref(null)
 
-  const url = 'ws://localhost:8000/ws/alerts' // change as needed
+  const url = 'ws://localhost:8001/ws/alerts' // change as needed
 
   const normalizeFaultType = (rawFaultType) => {
     const s = (rawFaultType || '').toString().trim()
@@ -22,11 +22,17 @@ export function useAlerts() {
     if (key.includes('BLOCKED') || key === 'BLOCKED_AIRFLOW' || key === 'FAN_BLOCKED') {
       return { code: 'BLOCKED_AIRFLOW', label: 'Blocked Airflow' }
     }
-    if (key.includes('BLADE') || key === 'BLADE_ISSUE') {
-      return { code: 'BLADE_ISSUE', label: 'Blade Issue' }
+    if (key.includes('INTERFERE') || key.includes('BLADE') || key === 'INTERFERENCE' || key === 'BLADE_ISSUE') {
+      return { code: 'INTERFERENCE', label: 'Interference' }
     }
-    if (key.includes('POWER') || key.includes('ELECTR') || key === 'POWER_ISSUE') {
-      return { code: 'POWER_ISSUE', label: 'Power Issue' }
+    if (
+      key.includes('IMBALANCE')
+      || key.includes('POWER')
+      || key.includes('ELECTR')
+      || key === 'IMBALANCE'
+      || key === 'POWER_ISSUE'
+    ) {
+      return { code: 'IMBALANCE', label: 'Imbalance' }
     }
 
     return { code: 'UNKNOWN', label: s || 'Unknown' }
@@ -138,6 +144,7 @@ export function useAlerts() {
               message: raw.message ?? '',
               confidence: raw.confidence,
               ts: raw.ts,
+              received_at_ms: Date.now(),
             }
             rawAlerts.value.unshift(entry)
             if (rawAlerts.value.length > MAX_RAW_ALERTS) {

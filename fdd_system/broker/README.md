@@ -1,37 +1,33 @@
 ## Broker module layout
 
-Broker code is now consolidated into three source files:
+Broker code is consolidated into:
 
 - `main.py`: CLI and runtime orchestration
-- `prediction_utils.py`: model/pipeline construction and prediction/calibration helpers
+- `prediction_utils.py`: model/pipeline construction and prediction helpers
 - `io_helpers.py`: serial reader, line parsing, window building, and alert transport
+- `simulator.py`: Arduino protocol-9 binary stream simulator over PTY or TCP
 
-## Local test loop (broker + simulator)
+## Local test loop (no Arduino)
 
-1) Create paired PTYs (two ends of a virtual serial cable):
+1) Start the simulator in one shell (PTY serial mode):
 ```bash
-socat -d -d PTY,link=/tmp/ttySIM1,raw,echo=0 PTY,link=/tmp/ttySIM2,raw,echo=0
+python fdd_system/broker/simulator.py \
+  --transport pty \
+  --pty-link /tmp/ttyARDUINO \
+  --fs-hz 800 \
+  --source-csv experiment/data_did_1/normal/normal_1.csv \
+  --loop
 ```
-`/tmp/ttySIM1` and `/tmp/ttySIM2` are the two ends; pick one for the broker and one for the simulator. But look at the output in the terminal for the two used port ends. Then replace the following [CHANGEME] with those ports. 
+This emits the same protocol-9 frame layout as `microcontroller/arduino.ino`
+(`[AA 55][x_lo x_hi y_lo y_hi z_lo z_hi][crc8(payload)]`) with firmware-like
+interval scheduling/resync behavior.
 
-2) Run the broker, pointing `--port` to one end:
+2) Point a consumer to `/tmp/ttyARDUINO`.
+
+Broker example:
 ```bash
 python -m fdd_system.broker.main \
-  --port [CHANGEME] \
-  --baudrate 115200 \
-  --model-path experiment/weights/model_best.joblib \
-  --model-format sklearn \
-  --embedder ml2 \
-  --preprocessor basic \
-  --alert-api-url http://127.0.0.1:8001/api/alert \
-  --asset-id FAN-01 \
-  --loop-delay 0.05
-```
-
-ONNX + 1D CNN example:
-```bash
-python -m fdd_system.broker.main \
-  --port [CHANGEME] \
+  --port /tmp/ttyARDUINO \
   --baudrate 115200 \
   --input-format bin \
   --fs-hz 800 \
@@ -40,12 +36,20 @@ python -m fdd_system.broker.main \
   --embedder raw1dcnn \
   --preprocessor robust \
   --alert-api-url http://127.0.0.1:8001/api/alert \
-  --asset-id FAN-01 \
-  --alert-timeout 1.0
+  --asset-id FAN-01
 ```
 
-3) Change the port on broker/simulator.py to the other end of the port. Then in another shell, run the simulator on the other end:
+Data collection example:
 ```bash
-python fdd_system/broker/simulator.py
+sh data_collection/run_getData.sh \
+  --time 10 \
+  --label test_sim.csv \
+  --port /tmp/ttyARDUINO \
+  --baud 115200 \
+  --fs 800
 ```
-Simulator streams samples from `fdd_system/broker/sample_data/blocked.csv`; broker reads them, builds windows, logs predictions, and forwards non-normal alerts to the backend API.
+
+Optional TCP mode is still available:
+```bash
+python fdd_system/broker/simulator.py --transport tcp --host 127.0.0.1 --port 9999
+```

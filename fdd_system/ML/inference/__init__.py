@@ -1,7 +1,13 @@
-from fdd_system.ML.inference.classification_pipeline import ClassificationPipeline
-from fdd_system.ML.inference.known_unknown_pipeline import KnownUnknownClassificationPipeline
+"""Backward-compatible wrapper for legacy imports."""
+
+from fdd_system.ML.pipeline import (
+    ClassificationPipeline,
+    KnownUnknownClassificationPipeline,
+    NormalityFaultClassificationPipeline,
+)
 
 __all__ = [
     "ClassificationPipeline",
     "KnownUnknownClassificationPipeline",
+    "NormalityFaultClassificationPipeline",
 ]

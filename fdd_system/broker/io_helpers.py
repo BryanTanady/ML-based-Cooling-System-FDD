@@ -16,7 +16,7 @@ import numpy as np
 import serial
 from serial.tools import list_ports
 
-from fdd_system.ML.common.config import OperatingCondition, RawAccWindow, SensorConfig
+from fdd_system.ML.schema import OperatingCondition, RawAccWindow, SensorConfig
 
 _XYZ_LOG_PATTERN = re.compile(
     r"x\s+([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+"

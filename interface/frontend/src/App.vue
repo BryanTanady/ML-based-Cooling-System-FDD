@@ -198,6 +198,17 @@ const clearExportFilters = () => {
   exportFaultType.value = ''
 }
 
+const getApiErrorMessage = (error, fallbackMessage) => {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) {
+    return `${fallbackMessage}: ${detail}`
+  }
+  if (typeof error?.message === 'string' && error.message.trim()) {
+    return `${fallbackMessage}: ${error.message}`
+  }
+  return fallbackMessage
+}
+
 // Fetch fault history when switching to Fault History or Export tab
 watch(currentSection, async (newSection) => {
   if (newSection === 'Fault History' || newSection === 'Export') {
@@ -208,7 +219,7 @@ watch(currentSection, async (newSection) => {
       try {
         faultHistory.value = await getFaultHistory()
       } catch (error) {
-        faultHistoryError.value = 'Failed to load fault history'
+        faultHistoryError.value = getApiErrorMessage(error, 'Failed to load fault history')
         console.error('Error loading fault history:', error)
       } finally {
         loadingFaultHistory.value = false
@@ -226,7 +237,7 @@ watch(currentSection, async (newSection) => {
   try {
     exportRawAlerts.value = await getRawAlerts()
   } catch (error) {
-    exportRawAlertsError.value = 'Failed to load raw alerts'
+    exportRawAlertsError.value = getApiErrorMessage(error, 'Failed to load raw alerts')
     console.error('Error loading raw alerts:', error)
   } finally {
     loadingExportRawAlerts.value = false
@@ -256,7 +267,7 @@ watch(currentSection, async (newSection) => {
         <!-- Overview Section -->
         <template v-if="currentSection === 'Overview'">
           <AlertsList :alerts="alerts" :raw-alerts="rawAlerts" :acknowledge-alert="acknowledgeAlert" class="alerts-list"/>
-          <SystemStatus :alerts="alerts" class="system-status"/>
+          <SystemStatus :alerts="alerts" :raw-alerts="rawAlerts" class="system-status"/>
         </template>
         
         <!-- Asset Management Section -->

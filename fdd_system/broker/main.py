@@ -6,20 +6,17 @@ Example usage:
       --baudrate 115200 \
       --input-format bin \
       --fs-hz 800 \
-      --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.pt \
+      --model-path experiment/weights/end_to_end_cnn1d_hybrid.pt \
       --model-format torch \
       --embedder auto \
       --preprocessor auto \
-      --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt \
-      --no-adabn-runtime-calibration \
-      --no-gate-runtime-calibration
+      --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import json
 import logging
 import time
 from collections import Counter, deque
@@ -28,28 +25,21 @@ from typing import Deque
 
 import numpy as np
 import serial
-from tqdm import tqdm
 
 from data_collection.binary_protocol import ADXLBinaryParser
-from fdd_system.ML.common.anomaly_detector import Stage0WindowGuard
-from fdd_system.ML.common.config import OperatingCondition, SensorConfig
-from fdd_system.ML.inference.known_unknown_pipeline import KnownUnknownClassificationPipeline
-from fdd_system.ML.inference.normality_fault_pipeline import NormalityFaultClassificationPipeline
+from fdd_system.ML.components.detector import Stage0WindowGuard
+from fdd_system.ML.schema import OperatingCondition, SensorConfig
+from fdd_system.ML.pipeline import KnownUnknownClassificationPipeline, NormalityFaultClassificationPipeline
 from fdd_system.broker.io_helpers import AlertSender, SerialReader, WindowBuilder, parse_sample
 from fdd_system.broker.prediction_utils import (
-    apply_runtime_adabn,
-    apply_runtime_gate_calibration,
     build_pipeline,
-    format_label_counts,
     log_live_debug_stats,
     log_prediction_counts,
     record_predictions,
-    supports_runtime_adabn,
-    supports_runtime_gate_calibration,
 )
 
 EXAMPLE_USAGE = """Examples:
-  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/end_to_end_cnn1d_hybrid_calaug.pt --model-format torch --embedder auto --preprocessor auto --no-adabn-runtime-calibration --no-gate-runtime-calibration
+  python -m fdd_system.broker.main --port /dev/ttyACM0 --baudrate 115200 --input-format bin --fs-hz 800 --model-path experiment/weights/end_to_end_cnn1d_hybrid.pt --model-format torch --embedder auto --preprocessor auto --anomaly-detector-path experiment/weights/end_to_end_anomaly_gate.pt
 """
 
 
@@ -104,83 +94,6 @@ class BrokerDataRecorder:
 
     def close(self) -> None:
         self._fh.close()
-
-
-def _resolve_adabn_ema_momentum(model_path: str, cli_value: float | None, log: logging.Logger) -> tuple[float, str]:
-    """Resolve AdaBN EMA momentum from CLI, then model metadata, then default."""
-    if cli_value is not None:
-        return float(cli_value), "cli"
-
-    metadata, meta_source = _load_runtime_calibration_metadata(model_path, log)
-    if metadata is not None:
-        value = metadata.get("runtime_calibration", {}).get("adabn", {}).get("ema_momentum")
-        if value is not None:
-            try:
-                return float(value), f"metadata:{meta_source}"
-            except (TypeError, ValueError):
-                log.warning("Invalid runtime_calibration.adabn.ema_momentum in %s: %r", meta_source, value)
-
-    return 0.1, "default"
-
-
-def _load_runtime_calibration_metadata(
-    model_path: str,
-    log: logging.Logger,
-) -> tuple[dict[str, object] | None, str | None]:
-    meta_candidates = [
-        Path(model_path).with_suffix(".meta.json"),
-        Path(model_path).with_name(f"{Path(model_path).stem}.meta.json"),
-    ]
-    for meta_path in meta_candidates:
-        if not meta_path.exists():
-            continue
-        try:
-            payload = json.loads(meta_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log.warning("Failed to parse model metadata at %s: %s", meta_path, exc)
-            continue
-        if isinstance(payload, dict):
-            return payload, meta_path.name
-        log.warning("Ignoring non-mapping model metadata at %s", meta_path)
-    return None, None
-
-
-def _coerce_optional_bool(value: object) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        if value in {0, 1}:
-            return bool(value)
-        return None
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    return None
-
-
-def _resolve_runtime_calibration_enabled(
-    model_path: str,
-    cli_value: bool | None,
-    log: logging.Logger,
-    *,
-    kind: str,
-) -> tuple[bool, str]:
-    if cli_value is not None:
-        return bool(cli_value), "cli"
-
-    metadata, meta_source = _load_runtime_calibration_metadata(model_path, log)
-    if metadata is not None:
-        value = metadata.get("runtime_calibration", {}).get(kind, {}).get("enabled")
-        parsed = _coerce_optional_bool(value)
-        if parsed is not None:
-            return parsed, f"metadata:{meta_source}"
-        if value is not None:
-            log.warning("Invalid runtime_calibration.%s.enabled in %s: %r", kind, meta_source, value)
-
-    return False, "default"
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -255,87 +168,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ],
         default="auto",
         help=(
-            "Input preprocessor. Default is basic unless overridden by ONNX metadata. "
+            "Input preprocessor. Default is basic unless overridden by model metadata. "
             "'centered_rms' subtracts per-axis window bias before RMS scaling."
-        ),
-    )
-    parser.add_argument(
-        "--calibration-seconds",
-        type=float,
-        default=20.0,
-        help="Collect this many seconds of startup data before inference for runtime adaptation (gate/AdaBN).",
-    )
-    parser.add_argument(
-        "--calibration-discard-seconds",
-        type=float,
-        default=2.0,
-        help=(
-            "Discard this many initial startup seconds before collecting calibration data. "
-            "Use this to skip spin-up transients and match notebook preprocessing."
-        ),
-    )
-    parser.add_argument(
-        "--gate-runtime-calibration",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "Adapt the KNOWN/UNKNOWN gate using the target-normal startup calibration windows "
-            "after preprocessing with the runtime pipeline. "
-            "If omitted, broker falls back to model metadata when available; otherwise disabled."
-        ),
-    )
-    parser.add_argument(
-        "--gate-distance-quantile",
-        type=float,
-        default=0.99,
-        help="Quantile of calibration-window gate distances used for runtime threshold adaptation.",
-    )
-    parser.add_argument(
-        "--gate-distance-margin",
-        type=float,
-        default=1.10,
-        help="Multiplicative slack applied to the runtime gate distance floor.",
-    )
-    parser.add_argument(
-        "--gate-ambiguity-quantile",
-        type=float,
-        default=0.99,
-        help="Quantile of calibration-window ambiguity ratios used for runtime gate adaptation.",
-    )
-    parser.add_argument(
-        "--gate-ambiguity-slack",
-        type=float,
-        default=0.05,
-        help="Additive slack applied to the runtime ambiguity-ratio threshold.",
-    )
-    parser.add_argument(
-        "--adabn-runtime-calibration",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "Recalibrate torch classifier BatchNorm running statistics (AdaBN) using startup calibration windows "
-            "after preprocessing/embedder normalization. "
-            "If omitted, broker falls back to model metadata when available; otherwise disabled."
-        ),
-    )
-    parser.add_argument(
-        "--adabn-batch-size",
-        type=int,
-        default=0,
-        help=(
-            "Batch size used for runtime AdaBN recalibration. "
-            "Set <=0 to run adaptation in one batch (recommended for exact global stats)."
-        ),
-    )
-    parser.add_argument(
-        "--adabn-ema-momentum",
-        type=float,
-        default=None,
-        help=(
-            "EMA momentum for runtime AdaBN BatchNorm running-stat updates. "
-            "Must be in (0, 1]. Higher values adapt faster to startup calibration data. "
-            "If omitted, broker uses model metadata runtime_calibration.adabn.ema_momentum when present; "
-            "otherwise defaults to 0.1."
         ),
     )
     parser.add_argument("--loop-delay", type=float, default=0.05, help="Sleep between loop iterations (seconds)")
@@ -407,7 +241,7 @@ def run_broker(args: argparse.Namespace) -> int:
         reader = SerialReader(port=args.port, baudrate=args.baudrate, timeout=args.timeout, buffer=buffer)
     else:
         ser = serial.serial_for_url(args.port, baudrate=args.baudrate, timeout=args.timeout)
-        bin_parser = ADXLBinaryParser(protocol="9", fs_hz=args.fs_hz)
+        bin_parser = ADXLBinaryParser(fs_hz=args.fs_hz)
 
     wb_fs = float(args.fs_hz) if args.input_format == "bin" else float(SensorConfig.SAMPLING_RATE)
     window_builder = WindowBuilder(SensorConfig.WINDOW_SIZE, sampling_rate_hz=wb_fs)
@@ -455,58 +289,13 @@ def run_broker(args: argparse.Namespace) -> int:
     if effective_normality_detector is None and isinstance(pipeline, NormalityFaultClassificationPipeline):
         effective_normality_detector = "auto-detected"
 
-    requested_gate_calibration, gate_calibration_source = _resolve_runtime_calibration_enabled(
-        args.model_path,
-        args.gate_runtime_calibration,
-        log,
-        kind="gate",
-    )
-    requested_adabn_calibration, adabn_enabled_source = _resolve_runtime_calibration_enabled(
-        args.model_path,
-        args.adabn_runtime_calibration,
-        log,
-        kind="adabn",
-    )
-    gate_calibration_supported = supports_runtime_gate_calibration(pipeline)
-    adabn_calibration_supported = supports_runtime_adabn(pipeline)
-    gate_calibration_enabled = requested_gate_calibration and gate_calibration_supported
-    adabn_calibration_enabled = requested_adabn_calibration and adabn_calibration_supported
-    calibration_enabled = gate_calibration_enabled or adabn_calibration_enabled
-    calibration_seconds = max(0.0, float(args.calibration_seconds))
-    calibration_discard_seconds = max(0.0, float(args.calibration_discard_seconds)) if calibration_enabled else 0.0
-    calibration_target_samples = int(round(calibration_seconds * wb_fs)) if calibration_enabled else 0
-    calibration_discard_samples = int(round(calibration_discard_seconds * wb_fs)) if calibration_enabled else 0
-    calibration_total_samples = calibration_discard_samples + calibration_target_samples
-    calibration_window_builder = (
-        WindowBuilder(SensorConfig.WINDOW_SIZE, sampling_rate_hz=wb_fs)
-        if calibration_enabled and calibration_target_samples > 0
-        else None
-    )
-    calibration_windows = []
-    calibration_samples_seen = 0
-    calibration_complete = not calibration_enabled or calibration_target_samples <= 0
-    discard_logged_complete = calibration_discard_samples == 0
-    calibration_progress = (
-        tqdm(total=calibration_discard_seconds + calibration_seconds, desc="Startup", unit="s")
-        if calibration_enabled and not calibration_complete
-        else None
-    )
-    adabn_ema_momentum, adabn_momentum_source = _resolve_adabn_ema_momentum(
-        args.model_path,
-        args.adabn_ema_momentum,
-        log,
-    )
-    if not (0.0 < adabn_ema_momentum <= 1.0):
-        raise ValueError(f"--adabn-ema-momentum must be in (0, 1], got {adabn_ema_momentum}.")
     prediction_counts: Counter[int] = Counter()
     end_time = time.time() + args.run_seconds if args.run_seconds else None
 
     log.info(
         (
             "Broker started. Reading from %s @ %s baud (format=%s, fs_hz=%.3f, alert_api=%s, asset_id=%s, "
-            "pipeline=%s, "
-            "normality_detector=%s, anomaly_detector=%s, stage0_validator=%s, calibration=%s, gate_calibration=%s, "
-            "adabn=%s, adabn_ema_momentum=%.4f (%s), debug_live_stats=%s)"
+            "pipeline=%s, normality_detector=%s, anomaly_detector=%s, stage0_validator=%s, debug_live_stats=%s)"
         ),
         args.port,
         args.baudrate,
@@ -518,210 +307,34 @@ def run_broker(args: argparse.Namespace) -> int:
         effective_normality_detector or "disabled",
         args.anomaly_detector_path or "disabled",
         stage0_guard_source,
-        (
-            f"discard={calibration_discard_seconds:.1f}s + calibrate={calibration_seconds:.1f}s"
-            if calibration_enabled
-            else "disabled"
-        ),
-        (
-            f"enabled ({gate_calibration_source})"
-            if gate_calibration_enabled
-            else (
-                f"disabled:unsupported ({gate_calibration_source})"
-                if requested_gate_calibration and not gate_calibration_supported
-                else f"disabled ({gate_calibration_source})"
-            )
-        ),
-        (
-            f"enabled ({adabn_enabled_source})"
-            if adabn_calibration_enabled
-            else (
-                f"disabled:unsupported ({adabn_enabled_source})"
-                if requested_adabn_calibration and not adabn_calibration_supported
-                else f"disabled ({adabn_enabled_source})"
-            )
-        ),
-        adabn_ema_momentum,
-        adabn_momentum_source,
         "enabled" if bool(args.debug_live_stats) else "disabled",
     )
-    if calibration_enabled and not calibration_complete:
-        if calibration_discard_seconds > 0:
-            log.info(
-                "Calibration enabled. Discarding %.1f seconds of startup data, then collecting %.1f seconds for calibration before inference.",
-                calibration_discard_seconds,
-                calibration_seconds,
-            )
-        else:
-            log.info("Calibration enabled. Collecting %.1f seconds of startup data before inference.", calibration_seconds)
-
-    def maybe_finish_calibration() -> None:
-        nonlocal calibration_complete, window_builder
-
-        if calibration_complete:
-            return
-        if calibration_samples_seen < calibration_total_samples:
-            return
-        if not calibration_windows:
-            raise RuntimeError("Calibration did not yield any windows; cannot run runtime adaptation.")
-
-        effective_calibration_windows = list(calibration_windows)
-        if stage0_guard is not None:
-            calibration_stage0 = stage0_guard.evaluate(effective_calibration_windows)
-            accepted_mask = np.asarray(calibration_stage0["accepted_mask"], dtype=bool).reshape(-1)
-            if accepted_mask.size != len(effective_calibration_windows):
-                raise RuntimeError(
-                    "Stage0 calibration mask length mismatch: "
-                    f"mask={accepted_mask.size}, windows={len(effective_calibration_windows)}"
-                )
-            effective_calibration_windows = [
-                window for window, accepted in zip(effective_calibration_windows, accepted_mask.tolist()) if accepted
-            ]
-            log.info(
-                "Calibration Stage0 filtering: accepted=%d / total=%d (rejected=%d)",
-                len(effective_calibration_windows),
-                len(calibration_windows),
-                len(calibration_windows) - len(effective_calibration_windows),
-            )
-            if not effective_calibration_windows:
-                raise RuntimeError("All calibration windows were rejected by Stage 0; cannot run runtime adaptation.")
-
-        gate_summary = apply_runtime_gate_calibration(
-            pipeline,
-            effective_calibration_windows,
-            enabled=gate_calibration_enabled,
-            distance_quantile=float(args.gate_distance_quantile),
-            distance_margin=float(args.gate_distance_margin),
-            ambiguity_quantile=float(args.gate_ambiguity_quantile),
-            ambiguity_slack=float(args.gate_ambiguity_slack),
-        )
-        adabn_summary = apply_runtime_adabn(
-            pipeline,
-            effective_calibration_windows,
-            enabled=adabn_calibration_enabled,
-            batch_size=int(args.adabn_batch_size) if int(args.adabn_batch_size) > 0 else None,
-            ema_momentum=adabn_ema_momentum,
-        )
-        calibration_complete = True
-        window_builder = WindowBuilder(SensorConfig.WINDOW_SIZE, sampling_rate_hz=wb_fs)
-        if calibration_progress is not None:
-            remaining = (calibration_discard_seconds + calibration_seconds) - float(calibration_progress.n)
-            if remaining > 0:
-                calibration_progress.update(remaining)
-            calibration_progress.close()
-        if gate_summary is not None:
-            log.info(
-                (
-                    "Runtime gate calibration updated thresholds: windows=%d, nearest_labels=%s, "
-                    "distance_floor=%.4f (effective=%.4f), fallback=%.4f->%.4f, ambiguity=%.4f->%.4f, "
-                    "unknown_before=%d, unknown_after=%d"
-                ),
-                gate_summary["num_windows"],
-                format_label_counts(gate_summary["nearest_label_counts"]),
-                gate_summary["distance_floor"],
-                gate_summary.get("effective_distance_floor", gate_summary["distance_floor"]),
-                gate_summary["old_fallback_threshold"],
-                gate_summary["new_fallback_threshold"],
-                gate_summary["old_ambiguity_ratio_threshold"],
-                gate_summary["new_ambiguity_ratio_threshold"],
-                gate_summary["unknown_before"],
-                gate_summary["unknown_after"],
-            )
-            if gate_summary.get("normality_threshold_cap_applied", False):
-                log.info(
-                    "Runtime normality-gate calibration cap applied: cap=%.4f, detector_labels=%s",
-                    gate_summary.get("normality_threshold_cap", float("nan")),
-                    gate_summary.get("detector_labels", []),
-                )
-        if adabn_summary is not None:
-            log.info(
-                (
-                    "Runtime AdaBN recalibration complete: windows=%d, preprocessed_windows=%d, feature_shape=%s, "
-                    "bn_layers=%d, batch_size=%d, batches=%d, ema_momentum=%.4f"
-                ),
-                adabn_summary["adaptation_windows"],
-                adabn_summary.get("preprocessed_windows", adabn_summary["adaptation_windows"]),
-                adabn_summary.get("feature_shape"),
-                adabn_summary["bn_layers"],
-                adabn_summary["adaptation_batch_size"],
-                adabn_summary["adaptation_batches"],
-                adabn_summary.get("ema_momentum", adabn_ema_momentum),
-            )
-        log.info("Calibration complete. Broker ready for inference.")
 
     def handle_sample(ax: float, ay: float, az: float, *, idx: int | None = None, t_us: int | None = None) -> None:
-        nonlocal calibration_samples_seen, discard_logged_complete
-
         if recorder is not None:
             recorder.record_sample(ax=ax, ay=ay, az=az, idx=idx, t_us=t_us)
 
-        if not calibration_complete:
-            seconds_before = calibration_samples_seen / wb_fs if wb_fs > 0 else 0.0
-            calibration_samples_seen += 1
-            seconds_after = calibration_samples_seen / wb_fs if wb_fs > 0 else (calibration_discard_seconds + calibration_seconds)
-            if calibration_progress is not None:
-                progress_total_seconds = calibration_discard_seconds + calibration_seconds
-                delta_seconds = min(seconds_after, progress_total_seconds) - min(seconds_before, progress_total_seconds)
-                if delta_seconds > 0:
-                    calibration_progress.update(delta_seconds)
-            if calibration_samples_seen <= calibration_discard_samples:
-                if (not discard_logged_complete) and calibration_samples_seen == calibration_discard_samples:
-                    log.info("Calibration discard complete. Collecting steady-state calibration windows.")
-                    discard_logged_complete = True
-                maybe_finish_calibration()
-                return
-
-            assert calibration_window_builder is not None
-            calibration_window = calibration_window_builder.add(ax, ay, az)
-            if calibration_window is not None:
-                calibration_windows.append(calibration_window)
-            maybe_finish_calibration()
+        window = window_builder.add(ax, ay, az)
+        if not window:
             return
 
-        window = window_builder.add(ax, ay, az)
-        if window:
-            if stage0_guard is not None:
-                stage0_details = stage0_guard.evaluate([window])
-                accepted_mask = np.asarray(stage0_details["accepted_mask"], dtype=bool)
-                if accepted_mask.size > 0 and not bool(accepted_mask[0]):
-                    preds = np.asarray([OperatingCondition.UNKNOWN.value], dtype=np.int64)
-                    confs = np.asarray([1.0], dtype=np.float32)
-                    rejection_stage = np.asarray(["STAGE0"], dtype=object)
-                    rejection_reason = np.asarray(
-                        [str(np.asarray(stage0_details["rejection_reason"], dtype=object)[0])],
-                        dtype=object,
-                    )
-                    if recorder is not None:
-                        recorder.record_prediction(
-                            preds=preds,
-                            confs=confs,
-                            rejection_stage=rejection_stage,
-                            rejection_reason=rejection_reason,
-                        )
-                    record_predictions(
-                        preds,
-                        confs,
-                        prediction_counts,
-                        alert_sender,
-                        log,
-                        rejection_stage=rejection_stage,
-                        rejection_reason=rejection_reason,
-                    )
-                    if bool(args.debug_live_stats):
-                        log_live_debug_stats(pipeline, [window], log)
-                    return
-
-            predict_details = getattr(pipeline, "predict_details", None)
-            if callable(predict_details):
-                details = predict_details([window])
-                preds = details["predictions"]
-                confs = details["confidence"]
+        if stage0_guard is not None:
+            stage0_details = stage0_guard.evaluate([window])
+            accepted_mask = np.asarray(stage0_details["accepted_mask"], dtype=bool)
+            if accepted_mask.size > 0 and not bool(accepted_mask[0]):
+                preds = np.asarray([OperatingCondition.UNKNOWN.value], dtype=np.int64)
+                confs = np.asarray([1.0], dtype=np.float32)
+                rejection_stage = np.asarray(["STAGE0"], dtype=object)
+                rejection_reason = np.asarray(
+                    [str(np.asarray(stage0_details["rejection_reason"], dtype=object)[0])],
+                    dtype=object,
+                )
                 if recorder is not None:
                     recorder.record_prediction(
                         preds=preds,
                         confs=confs,
-                        rejection_stage=details.get("rejection_stage"),
-                        rejection_reason=details.get("rejection_reason"),
+                        rejection_stage=rejection_stage,
+                        rejection_reason=rejection_reason,
                     )
                 record_predictions(
                     preds,
@@ -729,18 +342,44 @@ def run_broker(args: argparse.Namespace) -> int:
                     prediction_counts,
                     alert_sender,
                     log,
-                    rejection_stage=details.get("rejection_stage"),
-                    rejection_reason=details.get("rejection_reason"),
+                    rejection_stage=rejection_stage,
+                    rejection_reason=rejection_reason,
                 )
                 if bool(args.debug_live_stats):
                     log_live_debug_stats(pipeline, [window], log)
-            else:
-                preds, confs = pipeline.predict_with_confidence([window])
-                if recorder is not None:
-                    recorder.record_prediction(preds=preds, confs=confs)
-                record_predictions(preds, confs, prediction_counts, alert_sender, log)
-                if bool(args.debug_live_stats):
-                    log_live_debug_stats(pipeline, [window], log)
+                return
+
+        predict_details = getattr(pipeline, "predict_details", None)
+        if callable(predict_details):
+            details = predict_details([window])
+            preds = details["predictions"]
+            confs = details["confidence"]
+            if recorder is not None:
+                recorder.record_prediction(
+                    preds=preds,
+                    confs=confs,
+                    rejection_stage=details.get("rejection_stage"),
+                    rejection_reason=details.get("rejection_reason"),
+                )
+            record_predictions(
+                preds,
+                confs,
+                prediction_counts,
+                alert_sender,
+                log,
+                rejection_stage=details.get("rejection_stage"),
+                rejection_reason=details.get("rejection_reason"),
+            )
+            if bool(args.debug_live_stats):
+                log_live_debug_stats(pipeline, [window], log)
+            return
+
+        preds, confs = pipeline.predict_with_confidence([window])
+        if recorder is not None:
+            recorder.record_prediction(preds=preds, confs=confs)
+        record_predictions(preds, confs, prediction_counts, alert_sender, log)
+        if bool(args.debug_live_stats):
+            log_live_debug_stats(pipeline, [window], log)
 
     try:
         while True:
@@ -778,8 +417,6 @@ def run_broker(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         log.info("Broker stopping (Ctrl+C).")
     finally:
-        if calibration_progress is not None:
-            calibration_progress.close()
         log_prediction_counts(prediction_counts, log)
 
         if reader is not None:
@@ -790,6 +427,7 @@ def run_broker(args: argparse.Namespace) -> int:
                 ser.close()
             except Exception:
                 pass
+
         if recorder is not None:
             recorder.close()
 

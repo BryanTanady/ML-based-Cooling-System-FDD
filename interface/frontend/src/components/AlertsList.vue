@@ -47,18 +47,34 @@
 
     <template v-else>
       <h3>Graph View</h3>
-      <div class="graph-panel">
-        <div class="graph-controls">
-          <label for="observation-window">Observation Length</label>
-          <select id="observation-window" v-model.number="observationWindowSec">
-            <option
-              v-for="option in observationWindowOptions"
-              :key="option.value"
-              :value="option.value"
-            >
-              {{ option.label }}
-            </option>
-          </select>
+        <div class="graph-panel">
+          <div class="graph-controls">
+          <div class="graph-control-group">
+            <label for="observation-window">Observation Length</label>
+            <select id="observation-window" v-model.number="observationWindowSec">
+              <option
+                v-for="option in observationWindowOptions"
+                :key="option.value"
+                :value="option.value"
+              >
+                {{ option.label }}
+              </option>
+            </select>
+          </div>
+
+          <div class="graph-control-group">
+            <label for="line-connect-gap">Line Connect Gap</label>
+            <div class="graph-control-inline">
+              <input
+                id="line-connect-gap"
+                v-model.number="lineConnectGapMs"
+                type="number"
+                min="0"
+                step="50"
+              >
+              <span class="graph-control-unit">ms</span>
+            </div>
+          </div>
         </div>
 
         <div v-if="chartSeries.length === 0" class="graph-legend-empty">
@@ -200,6 +216,7 @@ const props = defineProps({
 
 const activeTab = ref('pending')
 const observationWindowSec = ref(30)
+const lineConnectGapMs = ref(600)
 const observationWindowOptions = [
   { label: '10 seconds', value: 10 },
   { label: '30 seconds', value: 30 },
@@ -229,8 +246,8 @@ const chartPadding = {
 
 const FAULT_COLORS = {
   BLOCKED_AIRFLOW: '#0052cc',
-  BLADE_ISSUE: '#2e7d32',
-  POWER_ISSUE: '#ef6c00',
+  INTERFERENCE: '#2e7d32',
+  IMBALANCE: '#ef6c00',
   UNKNOWN: '#d32f2f',
 }
 
@@ -238,8 +255,8 @@ function normalizeFaultCode(nameOrCode) {
   if (!nameOrCode || typeof nameOrCode !== 'string') return 'UNKNOWN'
   const key = nameOrCode.toUpperCase().replace(/\s+/g, '_').replace(/-+/g, '_')
   if (key.includes('BLOCKED') || key === 'BLOCKED_AIRFLOW' || key === 'FAN_BLOCKED') return 'BLOCKED_AIRFLOW'
-  if (key.includes('BLADE') || key === 'BLADE_ISSUE') return 'BLADE_ISSUE'
-  if (key.includes('POWER') || key.includes('ELECTR') || key === 'POWER_ISSUE') return 'POWER_ISSUE'
+  if (key.includes('INTERFERE') || key.includes('BLADE') || key === 'INTERFERENCE' || key === 'BLADE_ISSUE') return 'INTERFERENCE'
+  if (key.includes('IMBALANCE') || key.includes('POWER') || key.includes('ELECTR') || key === 'IMBALANCE' || key === 'POWER_ISSUE') return 'IMBALANCE'
   return key || 'UNKNOWN'
 }
 
@@ -306,6 +323,11 @@ const visibleChartPoints = computed(() => {
   return chartPoints.value.filter((point) => point.tsMs >= windowStartTsMs)
 })
 
+const normalizedLineConnectGapMs = computed(() => {
+  if (!Number.isFinite(lineConnectGapMs.value)) return 0
+  return Math.max(0, lineConnectGapMs.value)
+})
+
 const timeDomain = computed(() => {
   const max = timeAnchorMs.value
   const min = max - observationWindowSec.value * 1000
@@ -326,13 +348,19 @@ const scaleY = (confidence) => {
 const chartSeries = computed(() => {
   const grouped = new Map()
   let previousConditionName = null
+  let previousPointTsMs = null
   let runId = -1
 
   visibleChartPoints.value.forEach((point) => {
-    if (point.conditionName !== previousConditionName) {
+    const gapFromPreviousMs = previousPointTsMs === null ? 0 : point.tsMs - previousPointTsMs
+    if (
+      point.conditionName !== previousConditionName
+      || gapFromPreviousMs > normalizedLineConnectGapMs.value
+    ) {
       runId += 1
     }
     previousConditionName = point.conditionName
+    previousPointTsMs = point.tsMs
 
     if (!grouped.has(point.conditionName)) {
       grouped.set(point.conditionName, {
@@ -497,11 +525,11 @@ const xTicks = computed(() => {
   border-left-color: #0052cc;
 }
 
-.alert-item.BLADE_ISSUE {
+.alert-item.INTERFERENCE {
   border-left-color: #2e7d32;
 }
 
-.alert-item.POWER_ISSUE {
+.alert-item.IMBALANCE {
   border-left-color: #ef6c00;
 }
 
@@ -570,14 +598,27 @@ const xTicks = computed(() => {
 
 .graph-controls {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-end;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.graph-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .graph-controls label {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: #334155;
+}
+
+.graph-control-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .graph-controls select {
@@ -587,6 +628,22 @@ const xTicks = computed(() => {
   color: #1e293b;
   font-size: 15px;
   padding: 6px 10px;
+}
+
+.graph-controls input {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #1e293b;
+  font-size: 15px;
+  padding: 6px 10px;
+  width: 96px;
+}
+
+.graph-control-unit {
+  color: #475569;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .graph-legend {

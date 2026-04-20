@@ -24,8 +24,8 @@ class Alert(BaseModel):
 
 conditions = [
     (1, "BLOCKED_AIRFLOW", "Blocked Airflow"),
-    (2, "BLADE_ISSUE", "Blade Issue"),
-    (3, "POWER_ISSUE", "Power Issue"),
+    (2, "INTERFERENCE", "Interference"),
+    (3, "IMBALANCE", "Imbalance"),
 ]
 asset_list = [
     "FAN-01", "FAN-02", "FAN-03", "FAN-04", "FAN-05",

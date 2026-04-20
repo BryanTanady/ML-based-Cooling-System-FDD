@@ -1,4 +1,4 @@
-"""Prediction, pipeline construction, and calibration helpers for broker runtime."""
+"""Prediction and pipeline-construction helpers for broker runtime."""
 
 from __future__ import annotations
 
@@ -23,27 +23,28 @@ try:
 except ImportError:  # pragma: no cover - exercised by runtime environment
     torch = None
 
-from fdd_system.ML.common.anomaly_detector import load_anomaly_detector
-from fdd_system.ML.common.config import OperatingCondition
-from fdd_system.ML.common.embedder import (
+from fdd_system.ML.components.detector import load_anomaly_detector
+from fdd_system.ML.schema import OperatingCondition
+from fdd_system.ML.components.embedding import (
     MLEmbedder1,
     MLEmbedder2,
     Raw1DCNNEmbedder,
     Spectrogram2DEmbedder,
 )
-from fdd_system.ML.common.inferrer import OnnxInferrer, SklearnMLInferrer, TorchInferrer
-from fdd_system.ML.common.model import build_classifier_model
-from fdd_system.ML.common.preprocessor import (
-    CalibrationZNormalizer,
+from fdd_system.ML.components.inferrer import OnnxInferrer, SklearnMLInferrer, TorchInferrer
+from fdd_system.ML.components.model import build_classifier_model
+from fdd_system.ML.components.preprocessing import (
     CenteredRMSNormalization,
     DummyPreprocessor,
     MedianRemoval,
     RMSNormalization,
     StandardZNormal,
 )
-from fdd_system.ML.inference.classification_pipeline import ClassificationPipeline
-from fdd_system.ML.inference.known_unknown_pipeline import KnownUnknownClassificationPipeline
-from fdd_system.ML.inference.normality_fault_pipeline import NormalityFaultClassificationPipeline
+from fdd_system.ML.pipeline import (
+    ClassificationPipeline,
+    KnownUnknownClassificationPipeline,
+    NormalityFaultClassificationPipeline,
+)
 from fdd_system.broker.io_helpers import AlertSender
 
 
@@ -243,8 +244,6 @@ def _build_preprocessor(preprocessor_name: str, *, metadata: dict[str, Any] | No
             compatible_names = {
                 "basic": {"basic", "median"},
                 "median": {"basic", "median"},
-                "calibration": {"calibration", "calibration_z"},
-                "calibration_z": {"calibration", "calibration_z"},
                 "dummy": {"dummy"},
                 "robust": {"robust", "standard"},
                 "standard": {"robust", "standard"},
@@ -256,8 +255,6 @@ def _build_preprocessor(preprocessor_name: str, *, metadata: dict[str, Any] | No
 
     if preprocessor_name in {"basic", "median"}:
         return MedianRemoval()
-    if preprocessor_name in {"calibration", "calibration_z"}:
-        return CalibrationZNormalizer(**kwargs)
     if preprocessor_name == "dummy":
         return DummyPreprocessor()
     if preprocessor_name in {"robust", "standard"}:
@@ -896,263 +893,6 @@ def log_prediction_counts(prediction_counts: Counter[int], log: logging.Logger) 
         except ValueError:
             cls_name = f"Unknown({cls_id})"
         log.info("  %s: %s", cls_name, count)
-
-
-def _is_calibration_preprocessor(value: object) -> bool:
-    return isinstance(value, CalibrationZNormalizer)
-
-
-def _calibration_preprocessor_name(value: object) -> str:
-    if isinstance(value, CalibrationZNormalizer):
-        return "calibration_z"
-    raise TypeError(f"Unsupported calibration preprocessor: {type(value)!r}")
-
-
-def _fit_runtime_calibration_preprocessor(
-    template,
-    calibration_windows,
-):
-    if isinstance(template, CalibrationZNormalizer):
-        return CalibrationZNormalizer.fit(calibration_windows)
-    raise TypeError(f"Unsupported calibration preprocessor template: {type(template)!r}")
-
-
-def collect_calibration_targets(pipeline) -> list[tuple[object, str, str]]:
-    targets: list[tuple[object, str, str]] = []
-    seen_objects: set[int] = set()
-
-    def add_if_calibration_pre(owner: object, attr: str) -> None:
-        owner_id = id(owner)
-        if owner_id in seen_objects:
-            return
-        value = getattr(owner, attr, None)
-        if _is_calibration_preprocessor(value):
-            targets.append((owner, attr, "preprocessor"))
-            seen_objects.add(owner_id)
-
-    current = pipeline
-    visited_pipeline_ids: set[int] = set()
-    while current is not None and id(current) not in visited_pipeline_ids:
-        visited_pipeline_ids.add(id(current))
-        add_if_calibration_pre(current, "preprocessor")
-
-        detector = getattr(current, "anomaly_detector", None)
-        if detector is not None:
-            add_if_calibration_pre(detector, "preprocessor")
-
-        normality_detector = getattr(current, "normality_detector", None)
-        if normality_detector is not None:
-            add_if_calibration_pre(normality_detector, "preprocessor")
-
-        current = getattr(current, "classifier_pipeline", None)
-
-    return targets
-
-
-def apply_runtime_calibration(pipeline, calibration_windows) -> None:
-    for owner, attr, target_kind in collect_calibration_targets(pipeline):
-        template = getattr(owner, attr)
-        if target_kind == "preprocessor":
-            calibrated = _fit_runtime_calibration_preprocessor(template, calibration_windows)
-            preprocessor_name = _calibration_preprocessor_name(calibrated)
-            preprocessor_kwargs = calibrated.export_kwargs()
-            setattr(owner, attr, calibrated)
-            if hasattr(owner, "preprocessor_name"):
-                owner.preprocessor_name = preprocessor_name
-            if hasattr(owner, "preprocessor_kwargs"):
-                owner.preprocessor_kwargs = preprocessor_kwargs
-            if hasattr(owner, "bundle") and isinstance(getattr(owner, "bundle"), dict):
-                owner.bundle["preprocessor_name"] = preprocessor_name
-                owner.bundle["preprocessor_kwargs"] = preprocessor_kwargs
-            continue
-
-        raise ValueError(f"Unknown calibration target kind: {target_kind}")
-
-
-def apply_runtime_gate_calibration(
-    pipeline,
-    calibration_windows,
-    *,
-    enabled: bool,
-    distance_quantile: float,
-    distance_margin: float,
-    ambiguity_quantile: float,
-    ambiguity_slack: float,
-):
-    if not enabled:
-        return None
-
-    anomaly_detector = getattr(pipeline, "anomaly_detector", None)
-    if anomaly_detector is None:
-        return None
-
-    recalibrate = getattr(anomaly_detector, "recalibrate_from_normal_data", None)
-    if not callable(recalibrate):
-        return None
-
-    return recalibrate(
-        calibration_windows,
-        distance_quantile=distance_quantile,
-        distance_margin=distance_margin,
-        ambiguity_quantile=ambiguity_quantile,
-        ambiguity_slack=ambiguity_slack,
-    )
-
-
-def supports_runtime_gate_calibration(pipeline) -> bool:
-    anomaly_detector = getattr(pipeline, "anomaly_detector", None)
-    recalibrate = getattr(anomaly_detector, "recalibrate_from_normal_data", None)
-    return callable(recalibrate)
-
-
-def _iter_batchnorm_layers(model):
-    if torch is None:
-        return
-    for module in model.modules():
-        if isinstance(module, torch.nn.modules.batchnorm._BatchNorm):
-            yield module
-
-
-def _resolve_classifier_pipeline(pipeline):
-    current = pipeline
-    visited_ids: set[int] = set()
-    while current is not None and id(current) not in visited_ids:
-        visited_ids.add(id(current))
-        classifier_pipeline = getattr(current, "classifier_pipeline", None)
-        if classifier_pipeline is None:
-            return current
-        current = classifier_pipeline
-    return pipeline
-
-
-def supports_runtime_adabn(pipeline) -> bool:
-    if torch is None:
-        return False
-    classifier_pipeline = _resolve_classifier_pipeline(pipeline)
-    inferrer = getattr(classifier_pipeline, "inferrer", None)
-    model = getattr(inferrer, "model", None)
-    if not isinstance(model, torch.nn.Module):
-        return False
-    return any(True for _ in _iter_batchnorm_layers(model))
-
-
-@torch.no_grad() if torch is not None else (lambda fn: fn)
-def recalibrate_batchnorm_stats(
-    model,
-    x_np,
-    *,
-    batch_size: int | None = None,
-    ema_momentum: float = 0.1,
-) -> dict[str, Any]:
-    if torch is None:
-        raise ImportError("AdaBN recalibration requires torch.")
-    if not isinstance(model, torch.nn.Module):
-        raise TypeError("AdaBN recalibration expects a torch.nn.Module classifier.")
-
-    x_np = np.asarray(x_np, dtype=np.float32)
-    if x_np.ndim < 2:
-        raise ValueError(f"Expected AdaBN tensor with shape [N, ...], got {x_np.shape}.")
-    if x_np.shape[0] <= 0:
-        raise ValueError("AdaBN recalibration requires at least one window.")
-    ema_momentum = float(ema_momentum)
-    if not (0.0 < ema_momentum <= 1.0):
-        raise ValueError(f"AdaBN ema_momentum must be in (0, 1], got {ema_momentum}.")
-
-    bn_layers = list(_iter_batchnorm_layers(model))
-    if not bn_layers:
-        return {
-            "bn_layers": 0,
-            "adaptation_windows": int(x_np.shape[0]),
-            "adaptation_batch_size": int(x_np.shape[0]),
-            "adaptation_batches": 1,
-            "ema_momentum": ema_momentum,
-        }
-
-    old_training_mode = bool(model.training)
-    old_momentums: list[float | None] = []
-    old_track_running_stats: list[bool] = []
-    old_training_modes: list[bool] = []
-
-    for param in model.parameters():
-        param.requires_grad_(False)
-
-    model.eval()
-    for module in bn_layers:
-        old_momentums.append(module.momentum)
-        old_track_running_stats.append(bool(module.track_running_stats))
-        old_training_modes.append(bool(module.training))
-        module.train()
-        module.track_running_stats = True
-        module.momentum = ema_momentum
-
-    first_param = next(model.parameters(), None)
-    device = first_param.device if first_param is not None else torch.device("cpu")
-
-    effective_batch_size = int(x_np.shape[0]) if batch_size is None or int(batch_size) <= 0 else int(batch_size)
-    effective_batch_size = max(1, min(effective_batch_size, int(x_np.shape[0])))
-
-    batches = 0
-    for start in range(0, int(x_np.shape[0]), effective_batch_size):
-        xb = torch.from_numpy(x_np[start : start + effective_batch_size]).float().to(device)
-        _ = model(xb)
-        batches += 1
-
-    for module, momentum, track_running_stats, training_mode in zip(
-        bn_layers, old_momentums, old_track_running_stats, old_training_modes
-    ):
-        module.momentum = momentum
-        module.track_running_stats = track_running_stats
-        module.train(training_mode)
-
-    if old_training_mode:
-        model.train()
-    else:
-        model.eval()
-
-    return {
-        "bn_layers": int(len(bn_layers)),
-        "adaptation_windows": int(x_np.shape[0]),
-        "adaptation_batch_size": int(effective_batch_size),
-        "adaptation_batches": int(batches),
-        "ema_momentum": ema_momentum,
-    }
-
-
-def apply_runtime_adabn(
-    pipeline,
-    calibration_windows,
-    *,
-    enabled: bool,
-    batch_size: int | None = None,
-    ema_momentum: float = 0.1,
-) -> dict[str, Any] | None:
-    if not enabled or not calibration_windows:
-        return None
-    if torch is None:
-        return None
-
-    classifier_pipeline = _resolve_classifier_pipeline(pipeline)
-    preprocessor = getattr(classifier_pipeline, "preprocessor", None)
-    embedder = getattr(classifier_pipeline, "embedder", None)
-    inferrer = getattr(classifier_pipeline, "inferrer", None)
-    model = getattr(inferrer, "model", None)
-
-    if preprocessor is None or embedder is None or not isinstance(model, torch.nn.Module):
-        return None
-    if not any(True for _ in _iter_batchnorm_layers(model)):
-        return None
-
-    adapted_inputs = preprocessor.preprocess(list(calibration_windows))
-    feature_batch = np.asarray(embedder.embed(adapted_inputs), dtype=np.float32)
-    summary = recalibrate_batchnorm_stats(
-        model,
-        feature_batch,
-        batch_size=batch_size,
-        ema_momentum=ema_momentum,
-    )
-    summary["feature_shape"] = [int(v) for v in feature_batch.shape]
-    summary["preprocessed_windows"] = int(len(adapted_inputs))
-    return summary
 
 
 def format_label_counts(counts: dict[int, int]) -> str:

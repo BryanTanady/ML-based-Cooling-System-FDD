@@ -22,15 +22,31 @@ app = FastAPI(title="Capstone API")
 FRONTEND_URL = os.getenv("FRONTEND_URL")
 ML_URL = os.getenv("FAULT_DETECTION_URL")
 
+
+def _normalize_origin(origin: str | None) -> str | None:
+    if not origin:
+        return None
+    # Browser Origin headers do not include a trailing slash.
+    return origin.rstrip("/")
+
+
+_allowed_origins = sorted({
+    o for o in [
+        _normalize_origin(FRONTEND_URL),
+        _normalize_origin(ML_URL),
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+    ] if o
+})
+
 # WebSocket connection manager (module-global singleton)
 manager = ConnectionManager()
 
 app.add_middleware(
 CORSMiddleware,
-allow_origins=[
-FRONTEND_URL, # Frontend dev
-ML_URL, # Fault Detection dev
-],
+allow_origins=_allowed_origins,
 allow_credentials=True,
 allow_methods=["*"],
 allow_headers=["*"],

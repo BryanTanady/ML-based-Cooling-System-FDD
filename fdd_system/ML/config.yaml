@@ -1,0 +1,111 @@
+# Training config for `python -m fdd_system.ML.train`.
+# All relative paths are resolved from the repository root.
+
+# Global random seed used for file splits and model initialization.
+seed: 42
+
+training:
+  # `auto` prefers CUDA when available, otherwise CPU.
+  device: auto
+  # Number of CPU threads torch may use. Omit or set <= 0 for the default.
+  torch_threads: 2
+
+data:
+  # Dataset root with one folder per operating condition:
+  #   <dataset_path>/<folder_name>/*.csv
+  dataset_path: experiment/demo_1
+  # Seconds removed from the start of every file before windows are generated.
+  remove_first_second: 1.0
+  # Folder containing unknown / out-of-distribution examples for full-pipeline testing.
+  unknown_folder: unknown
+  # Mapping from dataset folder names to `OperatingCondition` enum names.
+  known_folders:
+    normal: NORMAL
+    blocked: BLOCKED_AIRFLOW
+    interfere: INTERFERENCE
+    imbalance: IMBALANCE
+  split:
+    # Fraction of files reserved for testing.
+    test_ratio: 0.2
+    # Fraction of the remaining pool reserved for validation.
+    val_ratio_in_trainval: 0.2
+  # Preprocessor run on each accepted window before training.
+  # Candidates: `basic`/`median`, `dummy`, `rms`, `centered_rms`, `robust`/`standard`.
+  preprocessor: centered_rms
+  preprocessor_kwargs:
+    # `centered_rms` subtracts the specified statistic per window before RMS scaling.
+    center: mean
+    # Small stabilizer added to the denominator.
+    eps: 1.0e-8
+
+stage0:
+  # Stage 0 rejects obviously bad windows before learned models run.
+  enabled: true
+  # Folder whose training split defines the nominal baseline.
+  reference_folder: normal
+  # RMS measurement mode used to fit the Stage 0 profile.
+  # Candidates: `raw`, `centered_window`.
+  rms_mode: centered_window
+  # Whether to fit lower and/or upper RMS bounds from the reference windows.
+  fit_lower_bound: true
+  fit_upper_bound: false
+  # Quantiles measured on the reference set before scaling.
+  rms_lower_q: 0.25
+  rms_upper_q: 0.95
+  # Multipliers applied to the selected quantiles to form hard bounds.
+  rms_lower_scale: 0.5
+  rms_upper_scale: 1.15
+
+gatekeeper:
+  # Output artifact path for the Mahalanobis gatekeeper.
+  artifact_path: fdd_system/ML/weights/end_to_end_anomaly_gate.pt
+  # Learned embedding size for the gatekeeper network.
+  embedding_dim: 16
+  epochs: 40
+  batch_size: 512
+  lr: 1.0e-3
+  # Separation margin used during embedding training.
+  margin: 0.5
+  # Regularization added when inverting covariance matrices.
+  covariance_reg: 1.0e-3
+  # Per-file aggregation parameters for window anomaly scores.
+  file_window_score_q: 0.99
+  file_threshold_margin: 2.1
+  ambiguity_ratio_threshold: 1.0
+  # Controls for optional prototype splitting per class.
+  max_prototypes_per_class: 6
+  min_windows_per_prototype: 30
+  min_silhouette_for_split: 0.05
+  kmeans_n_init: 10
+
+classifier:
+  # Candidates: `cnn1d`, `ml_lda`.
+  backend: cnn1d
+  artifact_path: fdd_system/ML/weights/end_to_end_cnn1d_hybrid.pt
+  # Architecture string passed to `build_classifier_model`.
+  # Candidates: `fan1d`, `fan1d_v2`/`fan1dcnn_v2`, `hybrid_timefreq`, `spectrogram2d`/`fan_spectrogram_cnn`.
+  architecture: hybrid_timefreq
+  epochs: 5
+  batch_size: 8
+  eval_batch_size: 256
+  early_stop_patience: 10
+  label_smoothing: 0.05
+  # Export an ONNX copy beside the torch checkpoint.
+  export_onnx: true
+  onnx_opset: 18
+  # Optional amplitude augmentation for CNN training windows.
+  train_random_amp_scaling: true
+  amp_scale_min: 0.8
+  amp_scale_max: 1.2
+  # Optional Gaussian noise augmentation.
+  noise_std_g: 0.002
+  noise_copies: 3
+  # Extra kwargs used only by the `ml_lda` embedder.
+  ml2_embedder_kwargs:
+    highpass_hz: 10.0
+
+outputs:
+  # Final training/evaluation summary written as JSON.
+  summary_json: fdd_system/ML/weights/end_to_end_training_summary.json
+  # Number of windows printed by the post-train smoke test.
+  smoke_test_samples: 4

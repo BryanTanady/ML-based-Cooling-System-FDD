@@ -8,9 +8,9 @@ from model import Alert
 # Last N seconds to count same-fault events
 WINDOW_SEC = 5.0
 # Min same-fault count in window to establish continuous fault
-K = 3
+K = 2
 # Seconds without receiving current fault to consider it ended
-L = 10.0
+L = 4.0
 
 
 

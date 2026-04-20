@@ -1,4 +1,4 @@
-"""Core ML building blocks shared by training and inference code."""
+"""Reusable ML building blocks shared by training and runtime code."""
 
 from fdd_system.ML.components.detector import (
     MahalanobisAnomalyDetector,
@@ -9,7 +9,6 @@ from fdd_system.ML.components.detector import (
     save_anomaly_detector_artifact,
     save_mahalanobis_gatekeeper,
 )
-from fdd_system.ML.schema import FanConfig, OperatingCondition, RawAccWindow, RawInput, SensorConfig
 from fdd_system.ML.components.embedding import (
     Embedder,
     MLEmbedder1,
@@ -44,7 +43,6 @@ __all__ = [
     "Embedder",
     "Fan1DCNN",
     "Fan1DCNNV2",
-    "FanConfig",
     "FanSpectrogramCNN",
     "HybridTimeFreq1DCNN",
     "Inferrer",
@@ -53,15 +51,11 @@ __all__ = [
     "MahalanobisAnomalyDetector",
     "MedianRemoval",
     "OnnxInferrer",
-    "OperatingCondition",
     "Preprocessor",
     "RMSNormalization",
     "Raw1DCNNEmbedder",
-    "RawAccWindow",
-    "RawInput",
     "ResBlock1D",
     "RobustPreprocessor",
-    "SensorConfig",
     "SklearnMLInferrer",
     "Spectrogram2DEmbedder",
     "Stage0WindowGuard",
