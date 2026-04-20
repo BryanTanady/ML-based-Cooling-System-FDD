@@ -1,2 +1,1 @@
-"""Data collection utilities (serial capture scripts, binary protocols, etc.)."""
-
+"""Data collection utilities (serial capture scripts, binary frame parsing, etc.)."""
