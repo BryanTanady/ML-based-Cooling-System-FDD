@@ -177,6 +177,11 @@ void loop() {
     // CRC over payload only (bytes 2..7)
     frame[8] = crc8_maxim(&frame[2], 6);
 
+    // Serial.print(x);
+    // Serial.print(",");
+    // Serial.print(y);
+    // Serial.print(",");
+    // Serial.println(z);
     Serial.write(frame, sizeof(frame));
 
   }
