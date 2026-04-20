@@ -28,7 +28,7 @@ By default, trained model artifacts are saved under:
 
 Showcase links:
 1. Video: https://www.youtube.com/watch?v=UvwnPZTXhio&list=PLjFm8PBGO0F8z925_EplnBXtj14-IaxE5&index=10
-2. Demo-only: https://drive.google.com/file/d/1_f4fucW7XOBmZQyJUaEBiju7nMfCWydN/view?usp=sharing
+2. Demo-only: https://drive.google.com/file/d/1_f4fucW7XOBmZQyJUaEBiju7nMfCWydN/view?usp=drive_link
 
 ## Project Structure 🗂️
 
@@ -130,3 +130,9 @@ chmod +x run.sh
 Open:
 - frontend: `http://localhost:5173`
 - backend health: `http://127.0.0.1:8001/`
+
+## Project Reports 📄
+
+Further details are available in the project reports:
+1. Design Document: https://drive.google.com/file/d/1dVEa0bjNggmH8lLV4ECCVX1VaXwYWolY/view?usp=drive_link
+2. Validation & Verification: https://drive.google.com/file/d/1lhp7cLlPgeR-Orol9_uXUfuKzvzehoiD/view?usp=drive_link
