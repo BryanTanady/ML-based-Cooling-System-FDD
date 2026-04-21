@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import random
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from sklearn.model_selection import train_test_split
 
-from experiment.utils import prepare_training_data
 from fdd_system.ML.components.detector import Stage0WindowGuard
 from fdd_system.ML.components.preprocessing import (
     CenteredRMSNormalization,
@@ -19,10 +20,67 @@ from fdd_system.ML.components.preprocessing import (
     RMSNormalization,
     StandardZNormal,
 )
-from fdd_system.ML.schema import RawAccWindow
+from fdd_system.ML.schema import RawAccWindow, SensorConfig
 from fdd_system.ML.training.common import UNKNOWN_LABEL, parse_known_folders, resolve_path
 
 DEFAULT_DATA_COLUMNS = ["X", "Y", "Z"]
+
+
+def _parse_training_files(
+    data_paths: list[str],
+    label: int,
+    *,
+    window_size: int,
+    stride: int,
+    col_names: list[str] | tuple[str, str, str] | None = None,
+    remove_first_second: float = 0.0,
+) -> list[RawAccWindow]:
+    windows: list[RawAccWindow] = []
+    selected_columns = DEFAULT_DATA_COLUMNS if col_names is None else list(col_names)
+
+    for path in data_paths:
+        frame = pd.read_csv(path)
+        discard_rows = int(round(max(0.0, float(remove_first_second)) * SensorConfig.SAMPLING_RATE))
+        if discard_rows > 0:
+            frame = frame.iloc[min(discard_rows, len(frame)) :].reset_index(drop=True)
+
+        num_rows = len(frame)
+        windows.extend(
+            RawAccWindow.from_dataframe_public_dset(
+                frame.iloc[start : start + window_size],
+                label,
+                selected_columns,
+            )
+            for start in range(0, num_rows - window_size + 1, stride)
+        )
+
+    return windows
+
+
+def prepare_training_data(
+    training_data: dict[int, list[str]] | OrderedDict[int, list[str]],
+    *,
+    shuffle: bool,
+    col_names: list[str] | tuple[str, str, str] | None = None,
+    remove_first_second: float = 0.0,
+) -> list[RawAccWindow]:
+    windows: list[RawAccWindow] = []
+    for label, paths in training_data.items():
+        windows.extend(
+            _parse_training_files(
+                paths,
+                int(label),
+                window_size=SensorConfig.WINDOW_SIZE,
+                stride=SensorConfig.STRIDE,
+                col_names=col_names,
+                remove_first_second=remove_first_second,
+            )
+        )
+
+    if shuffle:
+        random.shuffle(windows)
+
+    return windows
 
 
 @dataclass

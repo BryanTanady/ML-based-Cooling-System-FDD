@@ -31,6 +31,7 @@ By default, trained model artifacts are saved under:
 Showcase links:
 1. Video: https://www.youtube.com/watch?v=UvwnPZTXhio&list=PLjFm8PBGO0F8z925_EplnBXtj14-IaxE5&index=10
 2. Demo-only: https://drive.google.com/file/d/1_f4fucW7XOBmZQyJUaEBiju7nMfCWydN/view?usp=drive_link
+3. Presentation Slides: https://docs.google.com/presentation/d/1IoGezC2PvckYzIfwpbX58rVkQ0wS08qHT75yQKH34fY/edit?usp=sharing
 
 ## Demo Data 📦
 
