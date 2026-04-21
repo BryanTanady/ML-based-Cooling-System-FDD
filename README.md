@@ -32,6 +32,15 @@ Showcase links:
 1. Video: https://www.youtube.com/watch?v=UvwnPZTXhio&list=PLjFm8PBGO0F8z925_EplnBXtj14-IaxE5&index=10
 2. Demo-only: https://drive.google.com/file/d/1_f4fucW7XOBmZQyJUaEBiju7nMfCWydN/view?usp=drive_link
 
+## Demo Data 📦
+
+Demo data is available here:
+- https://drive.google.com/drive/folders/1JDa26zzWWB2jrI4Cw55EH3LqWULrvjto
+
+Place the downloaded dataset folder(s) under the repository root `data/` directory. Expected layout:
+- `data/<dataset_name>/<label>/*.csv`
+- for instance: `data/sample_data/normal/normal_1.csv`
+
 ## Project Structure 🗂️
 
 - `data_collection/`: scripts to record labeled accelerometer CSV data from serial input.
@@ -46,10 +55,10 @@ Showcase links:
 
 ### 1) Collect Data
 
-From the repo root, record data into folders expected by `fdd_system/ML/config.yaml` (example labels: `normal`, `blocked`, `interfere`, `imbalance`, and optional `unknown`):
+From the repo root, record data into folders under `data/` expected by `fdd_system/ML/config.yaml` (example labels: `normal`, `blocked`, `interfere`, `imbalance`, and optional `unknown`):
 
 ```bash
-mkdir -p experiment/demo_1/{normal,blocked,interfere,imbalance,unknown}
+mkdir -p data/demo_1/{normal,blocked,interfere,imbalance,unknown}
 ```
 
 Example recording command:
@@ -57,7 +66,7 @@ Example recording command:
 ```bash
 sh data_collection/run_getData.sh \
   --time 30 \
-  --label experiment/demo_1/normal/normal_1.csv \
+  --label data/demo_1/normal/normal_1.csv \
   --port /dev/ttyACM0 \
   --baud 115200 \
   --fs 800
@@ -68,7 +77,7 @@ Repeat for each condition and store each recording in its corresponding folder.
 ### 2) Run Training
 
 Check and update `fdd_system/ML/config.yaml` first:
-- `data.dataset_path` should point to your dataset root.
+- `data.dataset_path` should point to your dataset root under `data/` (for example, `data/sample_data`).
 - artifacts are already configured to save under `fdd_system/ML/weights/`.
 
 Run training:

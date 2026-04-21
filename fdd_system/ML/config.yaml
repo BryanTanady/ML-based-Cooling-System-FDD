@@ -13,7 +13,7 @@ training:
 data:
   # Dataset root with one folder per operating condition:
   #   <dataset_path>/<folder_name>/*.csv
-  dataset_path: data/demo_1
+  dataset_path: data/sample_data
   # Seconds removed from the start of every file before windows are generated.
   remove_first_second: 1.0
   # Folder containing unknown / out-of-distribution examples for full-pipeline testing.
